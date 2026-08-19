@@ -52,7 +52,9 @@ Each output record contains `question`, `answer`, and `framework: list[str]`.
   --steps 1000
 ```
 
-Set `teacher_adapter` in the OPD JSON config to load this adapter.
+The checked-in `configs/guided_opd.json` already points to this adapter as
+`framework_teacher_adapter`. The framework teacher is separate from the frozen base Qwen3-4B used to score OPD tokens,
+so both experiment arms receive logits from the same scoring teacher.
 
 ## 3. Run OPD
 
@@ -77,3 +79,76 @@ PYTHONPATH=src /root/blockdata/kv_cache_env/bin/python -m unittest discover -s t
 - The reference trainer uses batch size one and transfers full teacher logits between GPUs.
 - Framework quality depends on curated or answer-privileged framework labels.
 - The smoke run validates mechanics, not downstream accuracy.
+
+## Controlled comparison: what to run next
+
+Framework-label generation is complete when this prints `1000`:
+
+```bash
+wc -l data/gsm8k_frameworks.jsonl
+```
+
+Run the following commands from `/root/blockdata/framework-guided-opd`. Long commands are shown with `nohup` so an SSH
+disconnect does not stop them.
+
+### A. Train the framework teacher
+
+```bash
+nohup ./run_teacher_training.sh > teacher_training.log 2>&1 &
+tail -f teacher_training.log
+```
+
+Completion evidence:
+
+```bash
+test -f outputs/teacher-framework-adapter/adapter_model.safetensors && echo teacher-ready
+```
+
+### B. Train both matched OPD arms
+
+The two configurations differ only in rollout mode, output path, and the guided-only framework generator. The Student,
+scoring Teacher, data order, seed, steps, LoRA, generation budget, temperature, and GKD loss are identical.
+
+```bash
+nohup ./run_comparison_training.sh > comparison_training.log 2>&1 &
+tail -f comparison_training.log
+```
+
+This runs traditional OPD first and framework-guided OPD second. Completion evidence:
+
+```bash
+test -f outputs/vanilla-opd/student_adapter/adapter_model.safetensors && echo vanilla-ready
+test -f outputs/guided-opd/student_adapter/adapter_model.safetensors && echo guided-ready
+```
+
+If separate jobs are preferred, run:
+
+```bash
+PYTHONPATH=src TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 \
+  /root/blockdata/kv_cache_env/bin/python train_opd.py --config configs/vanilla_opd.json
+
+PYTHONPATH=src TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 \
+  /root/blockdata/kv_cache_env/bin/python train_opd.py --config configs/guided_opd.json
+```
+
+Do not reuse a non-empty output directory: the trainer refuses to append new metrics to an old run.
+
+### C. Evaluate and generate visual evidence
+
+```bash
+nohup ./run_evaluation.sh > comparison_evaluation.log 2>&1 &
+tail -f comparison_evaluation.log
+```
+
+The fixed, seeded 500-example GSM8K evaluation creates:
+
+```text
+outputs/comparison-eval/predictions.jsonl        per-question predictions and correctness
+outputs/comparison-eval/accuracy.csv             accuracy, correct/total, 95% Wilson interval
+outputs/comparison-eval/summary.json             machine-readable aggregate results
+outputs/comparison-eval/accuracy_comparison.png  annotated accuracy bar chart
+```
+
+The primary decision metric is exact-match accuracy. The chart also displays 95% Wilson confidence intervals; overlapping
+intervals mean the observed ranking should not automatically be treated as conclusive. `answer_format_rate` is reported as
+a diagnostic rather than the primary score.

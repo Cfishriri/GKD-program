@@ -16,6 +16,10 @@ STUDENT_SYSTEM_PROMPT = """You are a mathematical reasoning student.
 Complete the solution by following every supplied framework step.
 End with the final answer in the form: #### number"""
 
+VANILLA_STUDENT_SYSTEM_PROMPT = """You are a mathematical reasoning student.
+Solve the problem step by step.
+End with the final answer in the form: #### number"""
+
 
 def format_framework_prompt(question: str, answer: str) -> str:
     return (
@@ -36,6 +40,10 @@ def format_student_prompt(question: str, framework: Sequence[str]) -> str:
     )
 
 
+def format_vanilla_student_prompt(question: str) -> str:
+    return f"{VANILLA_STUDENT_SYSTEM_PROMPT}\n\nProblem:\n{question}\n\n<solution>\n"
+
+
 def extract_framework(text: str) -> list[str]:
     match = re.search(r"<framework>(.*?)(?:</framework>|$)", text, flags=re.DOTALL | re.IGNORECASE)
     body = match.group(1) if match else text
@@ -47,4 +55,3 @@ def extract_framework(text: str) -> list[str]:
     if not steps:
         raise ValueError("teacher output contains no numbered steps")
     return steps[:6]
-

@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from framework_opd.data import load_records
 from framework_opd.loss import generalized_jsd_loss
 from framework_opd.masking import causal_completion_mask
-from framework_opd.rollout import generate_guided_rollout
+from framework_opd.rollout import generate_opd_rollout, validate_mode
 
 
 def load_config(path: str) -> dict:
@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     config = load_config(args.config)
+    mode = validate_mode(config.get("mode", "guided"))
 
     random.seed(config["seed"])
     torch.manual_seed(config["seed"])
@@ -35,10 +36,19 @@ def main() -> None:
     teacher = AutoModelForCausalLM.from_pretrained(
         config["teacher_model"], local_files_only=True, trust_remote_code=True, dtype=torch.bfloat16
     ).to(config["teacher_device"])
-    if config.get("teacher_adapter"):
-        teacher = PeftModel.from_pretrained(teacher, config["teacher_adapter"], is_trainable=False)
     teacher.eval()
     teacher.requires_grad_(False)
+
+    framework_teacher = teacher
+    if mode == "guided" and config.get("framework_teacher_adapter"):
+        framework_base = AutoModelForCausalLM.from_pretrained(
+            config["teacher_model"], local_files_only=True, trust_remote_code=True, dtype=torch.bfloat16
+        ).to(config["teacher_device"])
+        framework_teacher = PeftModel.from_pretrained(
+            framework_base, config["framework_teacher_adapter"], is_trainable=False
+        )
+        framework_teacher.eval()
+        framework_teacher.requires_grad_(False)
 
     student = AutoModelForCausalLM.from_pretrained(
         config["student_model"], local_files_only=True, trust_remote_code=True, dtype=torch.bfloat16
@@ -63,15 +73,19 @@ def main() -> None:
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
+    if metrics_path.exists():
+        raise FileExistsError(f"refusing to mix runs in existing metrics file: {metrics_path}")
+    (output_dir / "run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2))
     optimizer.zero_grad(set_to_none=True)
 
     for step, record in enumerate(records[: config["max_steps"]], 1):
         student.eval()
-        rollout = generate_guided_rollout(
-            teacher,
+        rollout = generate_opd_rollout(
+            framework_teacher,
             student,
             tokenizer,
             record["question"],
+            mode=mode,
             framework_max_new_tokens=config["framework_max_new_tokens"],
             solution_max_new_tokens=config["solution_max_new_tokens"],
             temperature=config["generation_temperature"],
@@ -103,6 +117,7 @@ def main() -> None:
 
         metrics = {
             "step": step,
+            "mode": mode,
             "loss": loss_metrics["loss"].item(),
             "num_tokens": int(loss_metrics["num_tokens"].item()),
             "framework": rollout.framework,
