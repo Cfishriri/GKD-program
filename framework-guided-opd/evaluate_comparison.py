@@ -1409,6 +1409,30 @@ def run_evaluation(config: dict, output_dir: Path, manifest: dict, *, resume: bo
     print(json.dumps(summaries, ensure_ascii=False, indent=2), flush=True)
 
 
+def resolve_project_paths(config: dict, project_root: Path | None = None) -> dict:
+    """Resolve project-owned config paths without depending on the caller's cwd."""
+    root = (project_root or Path(__file__).resolve().parent).resolve()
+    resolved = dict(config)
+    for key in (
+        "student_model",
+        "teacher_model",
+        "framework_teacher_adapter",
+        "dataset",
+        "output_dir",
+    ):
+        value = resolved.get(key)
+        if value:
+            path = Path(value)
+            resolved[key] = str(path if path.is_absolute() else (root / path).resolve())
+    adapters = resolved.get("adapters")
+    if isinstance(adapters, dict):
+        resolved["adapters"] = {
+            name: str(path if (path := Path(value)).is_absolute() else (root / path).resolve())
+            for name, value in adapters.items()
+        }
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a provenance-locked paired 2×2 OPD evaluation")
     parser.add_argument("--config", required=True)
@@ -1419,11 +1443,12 @@ def main() -> None:
     config = json.loads(config_bytes)
     if not isinstance(config, dict):
         raise ValueError("evaluation config must be a JSON object")
+    repo_root = Path(__file__).resolve().parent
+    config = resolve_project_paths(config, repo_root)
     if args.resume:
         config["resume"] = True
     validate_config(config)
 
-    repo_root = Path(__file__).resolve().parent
     provenance = collect_provenance(config, repo_root)
     signature = experiment_signature(config)
     output_dir = Path(config["output_dir"])

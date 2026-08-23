@@ -1,9 +1,9 @@
 {
   "student_model": "/root/eb-public/huggingface-models/Qwen/Qwen3-1.7B",
   "teacher_model": "/root/eb-public/huggingface-models/Qwen/Qwen3-4B",
-  "framework_teacher_adapter": "/root/blockdata/framework-guided-opd/outputs/teacher-framework-adapter-v2",
+  "framework_teacher_adapter": "outputs/teacher-framework-adapter-v2",
   "dataset": "/root/eb-public/huggingface-datasets/openai/gsm8k/main/test-00000-of-00001.parquet",
-  "output_dir": "/root/blockdata/framework-guided-opd/outputs/comparison-eval-v2",
+  "output_dir": "outputs/comparison-eval-v2",
   "student_device": "cuda:0",
   "teacher_device": "cuda:1",
   "seed": 2026,
@@ -18,7 +18,7 @@
   "resume": false,
   "include_base": false,
   "adapters": {
-    "vanilla": "/root/blockdata/framework-guided-opd/outputs/vanilla-opd-v2/student_adapter",
-    "guided": "/root/blockdata/framework-guided-opd/outputs/guided-opd-v2/student_adapter"
+    "vanilla": "outputs/vanilla-opd-v2/student_adapter",
+    "guided": "outputs/guided-opd-v2/student_adapter"
   }
 }

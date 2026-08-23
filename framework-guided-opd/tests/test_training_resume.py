@@ -9,6 +9,29 @@ import train_opd
 
 
 class TrainingResumeTests(unittest.TestCase):
+    def test_project_paths_resolve_independently_of_process_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "relocated-project"
+            config = train_opd.resolve_project_paths(
+                {
+                    "student_model": "/models/student",
+                    "teacher_model": "/models/teacher",
+                    "dataset": "/datasets/train.parquet",
+                    "framework_teacher_adapter": "outputs/teacher",
+                    "output_dir": "outputs/student",
+                    "resume_from_checkpoint": "outputs/student/checkpoint",
+                },
+                root,
+            )
+            self.assertEqual(config["student_model"], "/models/student")
+            self.assertEqual(config["dataset"], "/datasets/train.parquet")
+            self.assertEqual(config["framework_teacher_adapter"], str(root / "outputs/teacher"))
+            self.assertEqual(config["output_dir"], str(root / "outputs/student"))
+            self.assertEqual(
+                config["resume_from_checkpoint"],
+                str(root / "outputs/student/checkpoint"),
+            )
+
     @staticmethod
     def _write_adapter(path: Path, payload: bytes = b"adapter") -> None:
         path.mkdir(parents=True, exist_ok=False)

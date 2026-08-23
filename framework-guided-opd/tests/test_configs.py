@@ -4,6 +4,37 @@ from pathlib import Path
 
 
 class ConfigTest(unittest.TestCase):
+    def test_runtime_entrypoints_are_relocatable(self):
+        root = Path(__file__).parents[1]
+        old_root = "/root/blockdata/framework-guided-opd"
+        for name in (
+            "run_framework_data.sh",
+            "run_teacher_training.sh",
+            "run_smoke.sh",
+            "run_comparison_training.sh",
+            "run_evaluation.sh",
+        ):
+            script = (root / name).read_text(encoding="utf-8")
+            self.assertIn('BASH_SOURCE[0]', script, name)
+            self.assertIn('PYTHONPATH="$SCRIPT_DIR/src"', script, name)
+            self.assertNotIn(old_root, script, name)
+
+    def test_project_artifact_paths_are_relative(self):
+        root = Path(__file__).parents[1]
+        for name in (
+            "evaluation.json",
+            "guided_opd.json",
+            "smoke.json",
+            "vanilla_opd.json",
+            "vanilla_smoke.json",
+        ):
+            config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
+            for key in ("framework_teacher_adapter", "output_dir"):
+                if config.get(key):
+                    self.assertFalse(Path(config[key]).is_absolute(), f"{name}:{key}")
+            for arm, path in config.get("adapters", {}).items():
+                self.assertFalse(Path(path).is_absolute(), f"{name}:adapters.{arm}")
+
     def test_controlled_configs_match(self):
         root = Path(__file__).parents[1]
         vanilla = json.loads((root / "configs/vanilla_opd.json").read_text())

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /root/blockdata/framework-guided-opd
-export PYTHONPATH=$PWD/src
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+export PYTHONPATH="$SCRIPT_DIR/src"
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 

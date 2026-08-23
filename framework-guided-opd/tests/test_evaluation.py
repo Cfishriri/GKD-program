@@ -21,6 +21,7 @@ if HAS_EVALUATION_RUNTIME:
         plot_grouped_accuracy,
         plot_paired_deltas,
         plot_paired_outcomes,
+        resolve_project_paths,
         sha256_text,
         stable_framework_id,
         validate_config,
@@ -45,6 +46,32 @@ from framework_opd.prompts import format_vanilla_student_prompt
 
 
 class EvaluationTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
+    def test_evaluation_project_paths_resolve_from_repo_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "relocated-project"
+            config = resolve_project_paths(
+                {
+                    "student_model": "/models/student",
+                    "teacher_model": "/models/teacher",
+                    "dataset": "/datasets/test.parquet",
+                    "framework_teacher_adapter": "outputs/teacher",
+                    "output_dir": "outputs/evaluation",
+                    "adapters": {
+                        "vanilla": "outputs/vanilla/student_adapter",
+                        "guided": "outputs/guided/student_adapter",
+                    },
+                },
+                root,
+            )
+            self.assertEqual(config["dataset"], "/datasets/test.parquet")
+            self.assertEqual(config["framework_teacher_adapter"], str(root / "outputs/teacher"))
+            self.assertEqual(config["output_dir"], str(root / "outputs/evaluation"))
+            self.assertEqual(
+                config["adapters"]["guided"],
+                str(root / "outputs/guided/student_adapter"),
+            )
+
     def test_extracts_only_marked_answer_and_normalizes_currency(self):
         self.assertEqual(extract_final_answer("Result:\n#### $1,234.50"), "1234.5")
         self.assertIsNone(extract_final_answer("unfinished: 2 + 3"))

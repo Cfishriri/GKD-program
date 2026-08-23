@@ -62,6 +62,25 @@ def load_config(path: str) -> dict:
         return json.load(stream)
 
 
+def resolve_project_paths(config: dict, project_root: Path | None = None) -> dict:
+    """Resolve project-owned config paths without depending on the caller's cwd."""
+    root = (project_root or Path(__file__).resolve().parent).resolve()
+    resolved = dict(config)
+    for key in (
+        "student_model",
+        "teacher_model",
+        "framework_teacher_adapter",
+        "dataset",
+        "output_dir",
+        "resume_from_checkpoint",
+    ):
+        value = resolved.get(key)
+        if value:
+            path = Path(value)
+            resolved[key] = str(path if path.is_absolute() else (root / path).resolve())
+    return resolved
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -814,7 +833,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Framework-guided on-policy distillation")
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
-    config = load_config(args.config)
+    config = resolve_project_paths(load_config(args.config))
     mode, configured_max_steps = _normalize_training_config(config)
 
     output_dir = Path(config["output_dir"])
