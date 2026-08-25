@@ -18,7 +18,7 @@ import peft
 import torch
 import transformers
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
 
 from framework_opd.data import load_records
 from framework_opd.evaluation import (
@@ -29,6 +29,7 @@ from framework_opd.evaluation import (
     paired_interaction,
     score_prediction,
     summarize,
+    truncate_after_first_complete_answer,
 )
 from framework_opd.framework_validation import validate_framework
 from framework_opd.prompts import format_student_prompt, format_vanilla_student_prompt
@@ -146,6 +147,23 @@ def load_causal_model(path: str, device: str):
     ).to(device)
 
 
+class AnswerLineStoppingCriteria(StoppingCriteria):
+    """Stop once newly generated text contains a complete strict answer line."""
+
+    def __init__(self, tokenizer, prompt_length: int) -> None:
+        self.tokenizer = tokenizer
+        self.prompt_length = int(prompt_length)
+
+    def __call__(self, input_ids, scores, **kwargs):
+        decisions = []
+        for sequence in input_ids:
+            generated_ids = sequence[self.prompt_length :].detach().cpu().tolist()
+            generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            _, found = truncate_after_first_complete_answer(generated_text)
+            decisions.append(found)
+        return torch.tensor(decisions, dtype=torch.bool, device=input_ids.device)
+
+
 def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> GenerationResult:
     encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
     encoded = {name: tensor.to(model.device) for name, tensor in encoded.items()}
@@ -156,6 +174,9 @@ def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> G
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            stopping_criteria=StoppingCriteriaList(
+                [AnswerLineStoppingCriteria(tokenizer, encoded["input_ids"].shape[1])]
+            ),
         )
     generated = output_ids[0, encoded["input_ids"].shape[1] :].detach().cpu().tolist()
     token_ids = tuple(int(token_id) for token_id in generated)
@@ -167,11 +188,15 @@ def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> G
     else:
         eos_token_ids = tuple(eos_token_ids)
     ended_with_eos = bool(token_ids and token_ids[-1] in eos_token_ids)
+    decoded_text = tokenizer.decode(token_ids, skip_special_tokens=True)
+    truncated_text, stopped_on_answer = truncate_after_first_complete_answer(decoded_text)
     return GenerationResult(
         token_ids=token_ids,
-        text=tokenizer.decode(token_ids, skip_special_tokens=True),
+        text=truncated_text,
         ended_with_eos=ended_with_eos,
-        hit_max_tokens=len(token_ids) >= max_new_tokens and not ended_with_eos,
+        hit_max_tokens=(
+            len(token_ids) >= max_new_tokens and not ended_with_eos and not stopped_on_answer
+        ),
         prompt_tokens=int(encoded["input_ids"].shape[1]),
     )
 
@@ -212,6 +237,8 @@ def validate_config(config: dict) -> None:
         value = config.get(key, 1)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{key} must be a positive integer")
+    if config["max_new_tokens"] > 2048:
+        raise ValueError("max_new_tokens must not exceed 2048")
     if not isinstance(config["seed"], int) or isinstance(config["seed"], bool):
         raise ValueError("seed must be an integer")
     if config.get("framework_failure_policy", "fallback") not in {"fallback", "error"}:

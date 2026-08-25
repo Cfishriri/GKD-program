@@ -14,6 +14,9 @@ NUMBER_PATTERN = r"[-+]?\$?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?"
 MARKED_ANSWER_PATTERN = re.compile(
     rf"[ \t]*####[ \t]+({NUMBER_PATTERN})[ \t]*"
 )
+COMPLETE_MARKED_ANSWER_LINE_PATTERN = re.compile(
+    rf"(?m)^[ \t]*####[ \t]+({NUMBER_PATTERN})[ \t]*(?:\r?\n)"
+)
 
 
 def file_sha256(path: str | Path) -> str:
@@ -90,6 +93,19 @@ def extract_final_answer(text: str) -> str | None:
         return None
     marked = MARKED_ANSWER_PATTERN.fullmatch(last_nonempty)
     return normalize_answer(marked.group(1)) if marked else None
+
+
+def truncate_after_first_complete_answer(text: str) -> tuple[str, bool]:
+    """Trim generation after its first valid marked answer line.
+
+    A newline is required so generation cannot stop after a numeric token that
+    could still be extended (for example, stopping at ``20`` before ``201``).
+    """
+
+    match = COMPLETE_MARKED_ANSWER_LINE_PATTERN.search(text)
+    if match is None:
+        return text, False
+    return text[: match.end()].rstrip("\r\n"), True
 
 
 def extract_relaxed_answer(text: str) -> str | None:

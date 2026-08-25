@@ -11,7 +11,9 @@ HAS_EVALUATION_RUNTIME = all(
 if HAS_EVALUATION_RUNTIME:
     from evaluate_comparison import (
         canonicalize_predictions,
+        AnswerLineStoppingCriteria,
         finalize_manifest,
+        generate_completion,
         load_adapter_metadata,
         load_framework_cache,
         load_prediction_rows,
@@ -40,12 +42,78 @@ from framework_opd.evaluation import (
     paired_interaction,
     score_prediction,
     summarize,
+    truncate_after_first_complete_answer,
     validate_resume_identity,
 )
 from framework_opd.prompts import format_vanilla_student_prompt
 
 
 class EvaluationTest(unittest.TestCase):
+    def test_truncates_after_first_complete_marked_answer_line(self):
+        text = "work\n#### 20\n\nThe total distance is repeated.\n#### 20\n"
+        truncated, found = truncate_after_first_complete_answer(text)
+        self.assertTrue(found)
+        self.assertEqual(truncated, "work\n#### 20")
+        self.assertEqual(extract_final_answer(truncated), "20")
+
+    def test_does_not_truncate_incomplete_escaped_or_malformed_markers(self):
+        for text in (
+            "work\n#### 20",
+            "work\n\\#### 20\ncontinued",
+            "work\n#### 12,34\ncontinued",
+            "work without a marked answer\n",
+        ):
+            self.assertEqual(truncate_after_first_complete_answer(text), (text, False))
+
+    @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
+    def test_answer_stopping_criteria_ignores_prompt_and_requires_newline(self):
+        import torch
+
+        class Tokenizer:
+            texts = {
+                (1,): "reasoning",
+                (1, 2): "reasoning\n#### 20",
+                (1, 2, 3): "reasoning\n#### 20\n",
+            }
+
+            def decode(self, token_ids, skip_special_tokens=True):
+                return self.texts[tuple(int(token_id) for token_id in token_ids)]
+
+        criteria = AnswerLineStoppingCriteria(Tokenizer(), prompt_length=2)
+        prompt_with_marker = torch.tensor([[99, 98]])
+        self.assertFalse(bool(criteria(torch.cat([prompt_with_marker, torch.tensor([[1]])], dim=1), None)[0]))
+        self.assertFalse(
+            bool(criteria(torch.cat([prompt_with_marker, torch.tensor([[1, 2]])], dim=1), None)[0])
+        )
+        self.assertTrue(
+            bool(criteria(torch.cat([prompt_with_marker, torch.tensor([[1, 2, 3]])], dim=1), None)[0])
+        )
+
+    @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
+    def test_generate_completion_crops_token_overshoot_without_reporting_truncation(self):
+        import torch
+
+        class Tokenizer:
+            pad_token_id = 0
+            eos_token_id = 99
+
+            def __call__(self, prompt, return_tensors, add_special_tokens):
+                return {"input_ids": torch.tensor([[8, 9]])}
+
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "reasoning\n#### 20\ncontinued"
+
+        class Model:
+            device = torch.device("cpu")
+
+            def generate(self, **kwargs):
+                return torch.tensor([[8, 9, 1, 2]])
+
+        result = generate_completion(Model(), Tokenizer(), "prompt", max_new_tokens=2)
+        self.assertEqual(result.text, "reasoning\n#### 20")
+        self.assertEqual(result.token_ids, (1, 2))
+        self.assertFalse(result.hit_max_tokens)
+
     @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
     def test_evaluation_project_paths_resolve_from_repo_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -615,6 +683,12 @@ class EvaluationTest(unittest.TestCase):
     def test_config_validation_runs_before_generation(self):
         with self.assertRaisesRegex(ValueError, "missing keys"):
             validate_config({})
+
+        config_path = Path(__file__).parents[1] / "configs" / "evaluation.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["max_new_tokens"] = 2049
+        with self.assertRaisesRegex(ValueError, "must not exceed 2048"):
+            validate_config(config)
 
     def test_evaluation_config_defines_both_adapters_and_paired_bootstrap(self):
         config_path = Path(__file__).parents[1] / "configs" / "evaluation.json"

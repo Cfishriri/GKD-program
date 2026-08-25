@@ -50,10 +50,11 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("-v2", guided["output_dir"])
         self.assertIn("-v2", guided["framework_teacher_adapter"])
 
-    def test_evaluation_uses_only_v2_artifacts_and_a_larger_answer_budget(self):
+    def test_evaluation_uses_v2_model_artifacts_and_bounded_answer_budget(self):
         root = Path(__file__).parents[1]
         evaluation = json.loads((root / "configs/evaluation.json").read_text())
-        self.assertIn("-v2", evaluation["output_dir"])
+        self.assertEqual(evaluation["output_dir"], "outputs/comparison-eval-v3-answer-stop")
         self.assertIn("-v2", evaluation["framework_teacher_adapter"])
         self.assertTrue(all("-v2" in path for path in evaluation["adapters"].values()))
-        self.assertGreaterEqual(evaluation["max_new_tokens"], 1024)
+        self.assertEqual(evaluation["max_new_tokens"], 2048)
+        self.assertLessEqual(evaluation["max_new_tokens"], 2048)
