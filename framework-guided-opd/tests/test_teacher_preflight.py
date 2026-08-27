@@ -75,6 +75,11 @@ class TeacherPreflightTest(unittest.TestCase):
                 "question": f"question {index}",
                 "answer": "reasoning\n#### 5",
                 "framework": ["Identify the quantities", "Combine them and verify the result"],
+                "semantic_verification": {
+                    "correct": True,
+                    "predicted_answer": "5",
+                    "reference_answer": "5",
+                },
             }
             for index in range(count)
         ]
@@ -93,6 +98,7 @@ class TeacherPreflightTest(unittest.TestCase):
     def _write_generation_audit(data: Path, audit_path: Path, **overrides) -> dict:
         digest = hashlib.sha256(data.read_bytes()).hexdigest()
         audit = {
+            "schema_version": 3,
             "status": "complete",
             "requested_valid": 1,
             "valid": 1,
@@ -100,6 +106,9 @@ class TeacherPreflightTest(unittest.TestCase):
             "output_sha256": digest,
             "data_sha256": digest,
             "partial_output": None,
+            "semantic_checks": 1,
+            "semantic_passes": 1,
+            "semantic_failures": 0,
         }
         audit.update(overrides)
         audit_path.write_text(json.dumps(audit), encoding="utf-8")
@@ -126,6 +135,7 @@ class TeacherPreflightTest(unittest.TestCase):
                 ({"output_sha256": "wrong"}, "output_sha256"),
                 ({"requested_valid": 2}, "counts"),
                 ({"output": str(root / "other.jsonl")}, "output path"),
+                ({"semantic_passes": 0, "semantic_failures": 1}, "semantic"),
             )
             for overrides, message in cases:
                 with self.subTest(overrides=overrides):

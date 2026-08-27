@@ -28,12 +28,15 @@ RESUME_SIGNATURE_KEYS = (
     "framework_max_new_tokens",
     "framework_max_attempts",
     "solution_max_new_tokens",
-    "generation_temperature",
+    "framework_generation_temperature",
+    "solution_generation_temperature",
 )
 
 SIGNATURE_SOURCE_FILES = (
     "train_opd.py",
     "src/framework_opd/data.py",
+    "src/framework_opd/answer_stopping.py",
+    "src/framework_opd/evaluation.py",
     "src/framework_opd/framework_validation.py",
     "src/framework_opd/loss.py",
     "src/framework_opd/masking.py",
@@ -808,6 +811,10 @@ def _normalize_training_config(config: dict) -> tuple[str, int]:
     checkpoint_steps = int(config.get("checkpoint_steps", 100))
     if checkpoint_steps <= 0:
         raise ValueError("checkpoint_steps must be positive")
+    for key in ("framework_generation_temperature", "solution_generation_temperature"):
+        value = config.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{key} must be a non-negative number")
     config["max_steps"] = max_steps
     config["gradient_accumulation_steps"] = accumulation_steps
     config["framework_max_attempts"] = framework_max_attempts
@@ -1023,7 +1030,8 @@ def main() -> None:
             mode=mode,
             framework_max_new_tokens=config["framework_max_new_tokens"],
             solution_max_new_tokens=config["solution_max_new_tokens"],
-            temperature=config["generation_temperature"],
+            framework_temperature=config["framework_generation_temperature"],
+            solution_temperature=config["solution_generation_temperature"],
             framework_max_attempts=config["framework_max_attempts"],
         )
         student.train()
@@ -1099,6 +1107,7 @@ def main() -> None:
             "generated_token_count": len(rollout.generated_token_ids),
             "ended_with_eos": rollout.ended_with_eos,
             "hit_max_tokens": rollout.hit_max_tokens,
+            "stopped_on_answer": rollout.stopped_on_answer,
             **_framework_rollout_metrics(rollout),
             "checkpoint": str(checkpoint_path) if checkpoint_path is not None else None,
             "framework": rollout.framework,

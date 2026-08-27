@@ -4,6 +4,7 @@ from unittest.mock import patch
 import torch
 
 from framework_opd.rollout import (
+    FrameworkGenerationResult,
     GenerationResult,
     _generate_text,
     generate_framework,
@@ -45,6 +46,27 @@ class FakeModel:
 
 
 class RolloutTokenTest(unittest.TestCase):
+    def test_answer_aware_generation_crops_overshoot_and_records_stop_reason(self):
+        class AnswerTokenizer(FakeTokenizer):
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "reasoning\n#### 20\ncontinued"
+
+        model = FakeModel([5, 6])
+        result = _generate_text(
+            model,
+            AnswerTokenizer(),
+            "prompt containing #### format instructions",
+            2,
+            0.0,
+            stop_on_answer=True,
+        )
+
+        self.assertEqual(result.text, "reasoning\n#### 20")
+        self.assertEqual(result.token_ids, (5, 6))
+        self.assertTrue(result.stopped_on_answer)
+        self.assertFalse(result.hit_max_tokens)
+        self.assertIn("stopping_criteria", model.generation_kwargs)
+
     def test_generation_result_reports_actual_eos(self):
         model = FakeModel([5, 9])
         result = _generate_text(model, FakeTokenizer(), "prompt", 2, 0.0)
@@ -77,6 +99,7 @@ class RolloutTokenTest(unittest.TestCase):
             text="normalized completion",
             ended_with_eos=False,
             hit_max_tokens=True,
+            stopped_on_answer=False,
         )
         with patch("framework_opd.rollout._generate_text", return_value=sampled):
             rollout = generate_opd_rollout(
@@ -87,7 +110,8 @@ class RolloutTokenTest(unittest.TestCase):
                 mode="vanilla",
                 framework_max_new_tokens=4,
                 solution_max_new_tokens=2,
-                temperature=0.0,
+                framework_temperature=0.0,
+                solution_temperature=0.0,
             )
 
         self.assertEqual(rollout.generated_token_ids, (7, 8))
@@ -95,6 +119,52 @@ class RolloutTokenTest(unittest.TestCase):
         self.assertEqual(rollout.labels.tolist(), [[-100, -100, 7, 8]])
         self.assertNotIn(9, rollout.input_ids.tolist()[0])
         self.assertTrue(rollout.hit_max_tokens)
+        self.assertFalse(rollout.stopped_on_answer)
+
+    def test_student_rollout_enables_answer_stopping(self):
+        sampled = GenerationResult((7,), "#### 7", False, False, stopped_on_answer=True)
+        with patch("framework_opd.rollout._generate_text", return_value=sampled) as generate:
+            rollout = generate_opd_rollout(
+                None,
+                None,
+                FakeTokenizer(),
+                "question",
+                mode="vanilla",
+                framework_max_new_tokens=4,
+                solution_max_new_tokens=2,
+                framework_temperature=0.0,
+                solution_temperature=0.7,
+            )
+
+        self.assertTrue(generate.call_args.kwargs["stop_on_answer"])
+        self.assertTrue(rollout.stopped_on_answer)
+
+    def test_guided_rollout_routes_framework_and_solution_temperatures_separately(self):
+        framework_result = FrameworkGenerationResult(
+            ("Plan relation", "Check result"), 1, False, (), 2, 3, 0, False, True
+        )
+        sampled = GenerationResult((7,), "#### 7", False, False, stopped_on_answer=True)
+        with (
+            patch(
+                "framework_opd.rollout.generate_framework_result",
+                return_value=framework_result,
+            ) as framework_generate,
+            patch("framework_opd.rollout._generate_text", return_value=sampled) as solution_generate,
+        ):
+            generate_opd_rollout(
+                None,
+                None,
+                FakeTokenizer(),
+                "question",
+                mode="guided",
+                framework_max_new_tokens=4,
+                solution_max_new_tokens=2,
+                framework_temperature=0.0,
+                solution_temperature=0.7,
+            )
+
+        self.assertEqual(framework_generate.call_args.kwargs["temperature"], 0.0)
+        self.assertEqual(solution_generate.call_args.args[4], 0.7)
 
     def test_framework_generation_retries_validation_failure(self):
         first = GenerationResult((3,), "1. bad\n2. bad\n</framework>", False, False)
@@ -122,6 +192,26 @@ class RolloutTokenTest(unittest.TestCase):
         retry_prompt = generate.call_args_list[1].args[2]
         self.assertTrue(retry_prompt.endswith("<framework>\n"))
         self.assertLess(retry_prompt.index("previous attempt"), retry_prompt.rindex("<framework>"))
+
+    def test_oracle_framework_generation_uses_reference_aware_prompt(self):
+        generated = GenerationResult(
+            (4,), "1. Plan relation\n2. Check result\n</framework>", False, False
+        )
+        with patch("framework_opd.rollout._generate_text", return_value=generated) as generate:
+            result = generate_framework_result(
+                None,
+                FakeTokenizer(),
+                "question",
+                max_new_tokens=8,
+                temperature=0.0,
+                max_attempts=1,
+                reference_answer="work\n#### 7",
+            )
+
+        self.assertFalse(result.used_fallback)
+        prompt = generate.call_args.args[2]
+        self.assertIn("Reference solution:\nwork\n#### 7", prompt)
+        self.assertIn("Given a problem and its reference solution", prompt)
 
     def test_framework_generation_uses_recorded_fallback_after_all_attempts(self):
         invalid = GenerationResult((3,), "not numbered", False, False)

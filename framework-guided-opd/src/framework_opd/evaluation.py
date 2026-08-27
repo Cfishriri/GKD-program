@@ -6,16 +6,14 @@ import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from .answer_stopping import NUMBER_PATTERN, truncate_after_first_complete_answer
+
 
 # Commas are accepted only as real thousands separators.  Horizontal whitespace is
 # spelled out deliberately: ``\s`` would also match a newline and weaken the
 # physical-line contract used by the strict metric.
-NUMBER_PATTERN = r"[-+]?\$?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?"
 MARKED_ANSWER_PATTERN = re.compile(
     rf"[ \t]*####[ \t]+({NUMBER_PATTERN})[ \t]*"
-)
-COMPLETE_MARKED_ANSWER_LINE_PATTERN = re.compile(
-    rf"(?m)^[ \t]*####[ \t]+({NUMBER_PATTERN})[ \t]*(?:\r?\n)"
 )
 
 
@@ -95,19 +93,6 @@ def extract_final_answer(text: str) -> str | None:
     return normalize_answer(marked.group(1)) if marked else None
 
 
-def truncate_after_first_complete_answer(text: str) -> tuple[str, bool]:
-    """Trim generation after its first valid marked answer line.
-
-    A newline is required so generation cannot stop after a numeric token that
-    could still be extended (for example, stopping at ``20`` before ``201``).
-    """
-
-    match = COMPLETE_MARKED_ANSWER_LINE_PATTERN.search(text)
-    if match is None:
-        return text, False
-    return text[: match.end()].rstrip("\r\n"), True
-
-
 def extract_relaxed_answer(text: str) -> str | None:
     """Extract a marked answer, or the last number as a diagnostic fallback."""
 
@@ -151,6 +136,7 @@ def summarize(rows: list[dict]) -> dict:
     correct = sum(bool(row["correct"]) for row in rows)
     relaxed_correct = sum(bool(row.get("relaxed_correct", row["correct"])) for row in rows)
     marker_count = sum(bool(row["has_answer_marker"]) for row in rows)
+    answer_stop_count = sum(bool(row.get("stopped_on_answer", False)) for row in rows)
     eos_count = sum(bool(row.get("ended_with_eos", False)) for row in rows)
     truncated_count = sum(bool(row.get("hit_max_tokens", False)) for row in rows)
     framework_failures = sum(bool(row.get("framework_failure", False)) for row in rows)
@@ -193,6 +179,7 @@ def summarize(rows: list[dict]) -> dict:
         "relaxed_accuracy_ci95_low": relaxed_ci_low,
         "relaxed_accuracy_ci95_high": relaxed_ci_high,
         "answer_format_rate": marker_count / total if total else 0.0,
+        "answer_stop_rate": answer_stop_count / total if total else 0.0,
         "eos_rate": eos_count / total if total else 0.0,
         "truncation_rate": truncated_count / total if total else 0.0,
         "framework_failure_rate": framework_failures / total if total else 0.0,

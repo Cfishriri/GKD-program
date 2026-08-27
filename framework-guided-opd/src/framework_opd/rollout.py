@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 
 import torch
+from transformers import StoppingCriteriaList
 
+from .answer_stopping import AnswerLineStoppingCriteria, truncate_after_first_complete_answer
 from .framework_validation import require_valid_framework
 from .prompts import (
     extract_framework,
+    format_framework_prompt,
     format_rollout_framework_prompt,
     format_student_prompt,
     format_vanilla_student_prompt,
@@ -19,6 +22,7 @@ class GenerationResult:
     ended_with_eos: bool
     hit_max_tokens: bool
     prompt_tokens: int = 0
+    stopped_on_answer: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,7 @@ class GuidedRollout:
     generated_token_ids: tuple[int, ...]
     ended_with_eos: bool
     hit_max_tokens: bool
+    stopped_on_answer: bool
     framework_attempts: int
     framework_fallback: bool
     framework_validation_errors: tuple[str, ...]
@@ -76,7 +81,13 @@ def validate_mode(mode: str) -> str:
 
 
 def _generate_text(
-    model, tokenizer, prompt: str, max_new_tokens: int, temperature: float
+    model,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+    *,
+    stop_on_answer: bool = False,
 ) -> GenerationResult:
     if max_new_tokens <= 0:
         raise ValueError("max_new_tokens must be positive")
@@ -90,6 +101,10 @@ def _generate_text(
     }
     if temperature > 0:
         generation_kwargs.update(temperature=temperature, top_p=0.9)
+    if stop_on_answer:
+        generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
+            [AnswerLineStoppingCriteria(tokenizer, encoded["input_ids"].shape[1])]
+        )
     with torch.no_grad():
         output_ids = model.generate(
             **encoded,
@@ -106,12 +121,17 @@ def _generate_text(
     else:
         eos_token_ids = tuple(eos_token_ids)
     ended_with_eos = bool(token_ids and token_ids[-1] in eos_token_ids)
+    decoded_text = tokenizer.decode(token_ids, skip_special_tokens=True)
+    text, stopped_on_answer = truncate_after_first_complete_answer(decoded_text)
     return GenerationResult(
         token_ids=token_ids,
-        text=tokenizer.decode(token_ids, skip_special_tokens=True),
+        text=text,
         ended_with_eos=ended_with_eos,
-        hit_max_tokens=len(token_ids) >= max_new_tokens and not ended_with_eos,
+        hit_max_tokens=(
+            len(token_ids) >= max_new_tokens and not ended_with_eos and not stopped_on_answer
+        ),
         prompt_tokens=int(encoded["input_ids"].shape[1]),
+        stopped_on_answer=stopped_on_answer,
     )
 
 
@@ -147,6 +167,7 @@ def _build_rollout(
         generated_token_ids=generation.token_ids,
         ended_with_eos=generation.ended_with_eos,
         hit_max_tokens=generation.hit_max_tokens,
+        stopped_on_answer=generation.stopped_on_answer,
         framework_attempts=framework_attempts,
         framework_fallback=framework_fallback,
         framework_validation_errors=framework_validation_errors,
@@ -166,7 +187,8 @@ def generate_guided_rollout(
     *,
     framework_max_new_tokens: int,
     solution_max_new_tokens: int,
-    temperature: float,
+    framework_temperature: float,
+    solution_temperature: float,
     framework_max_attempts: int = 3,
 ) -> GuidedRollout:
     framework_result = generate_framework_result(
@@ -174,13 +196,18 @@ def generate_guided_rollout(
         tokenizer,
         question,
         max_new_tokens=framework_max_new_tokens,
-        temperature=temperature,
+        temperature=framework_temperature,
         max_attempts=framework_max_attempts,
     )
     framework = list(framework_result.steps)
     student_prompt = format_student_prompt(question, framework)
     generation = _generate_text(
-        student, tokenizer, student_prompt, solution_max_new_tokens, temperature
+        student,
+        tokenizer,
+        student_prompt,
+        solution_max_new_tokens,
+        solution_temperature,
+        stop_on_answer=True,
     )
     return _build_rollout(
         question=question,
@@ -228,6 +255,7 @@ def generate_framework_result(
     max_new_tokens: int,
     temperature: float,
     max_attempts: int = 3,
+    reference_answer: str | None = None,
 ) -> FrameworkGenerationResult:
     if max_attempts <= 0:
         raise ValueError("max_attempts must be positive")
@@ -240,7 +268,11 @@ def generate_framework_result(
     last_ended_with_eos = False
     closed_tag = False
     for attempt in range(1, max_attempts + 1):
-        prompt = format_rollout_framework_prompt(question, retry_reasons=retry_reasons)
+        prompt = (
+            format_framework_prompt(question, reference_answer, retry_reasons=retry_reasons)
+            if reference_answer is not None
+            else format_rollout_framework_prompt(question, retry_reasons=retry_reasons)
+        )
         generation = _generate_text(teacher, tokenizer, prompt, max_new_tokens, temperature)
         prompt_tokens += generation.prompt_tokens
         generated_tokens += len(generation.token_ids)
@@ -259,7 +291,7 @@ def generate_framework_result(
             continue
         try:
             steps = require_valid_framework(
-                extract_framework(framework_text, require_closed=True), None
+                extract_framework(framework_text, require_closed=True), reference_answer
             )
             return FrameworkGenerationResult(
                 tuple(steps),
@@ -298,7 +330,8 @@ def generate_opd_rollout(
     mode: str,
     framework_max_new_tokens: int,
     solution_max_new_tokens: int,
-    temperature: float,
+    framework_temperature: float,
+    solution_temperature: float,
     framework_max_attempts: int = 3,
 ) -> GuidedRollout:
     mode = validate_mode(mode)
@@ -310,13 +343,19 @@ def generate_opd_rollout(
             question,
             framework_max_new_tokens=framework_max_new_tokens,
             solution_max_new_tokens=solution_max_new_tokens,
-            temperature=temperature,
+            framework_temperature=framework_temperature,
+            solution_temperature=solution_temperature,
             framework_max_attempts=framework_max_attempts,
         )
 
     student_prompt = format_vanilla_student_prompt(question)
     generation = _generate_text(
-        student, tokenizer, student_prompt, solution_max_new_tokens, temperature
+        student,
+        tokenizer,
+        student_prompt,
+        solution_max_new_tokens,
+        solution_temperature,
+        stop_on_answer=True,
     )
     return _build_rollout(
         question=question,

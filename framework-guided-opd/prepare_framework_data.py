@@ -8,6 +8,7 @@ from pathlib import Path
 
 from framework_opd.data import load_records
 from framework_opd.framework_validation import LEAKAGE_REASONS, validate_framework
+from framework_opd.framework_semantics import verify_framework_semantics
 from framework_opd.prompts import extract_framework, format_framework_prompt, has_complete_framework
 
 
@@ -129,6 +130,7 @@ def main() -> None:
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=0.4)
+    parser.add_argument("--semantic-max-new-tokens", type=int, default=512)
     parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument(
         "--audit-output",
@@ -141,6 +143,8 @@ def main() -> None:
         parser.error("--limit must be at least 1")
     if args.temperature < 0:
         parser.error("--temperature must be non-negative")
+    if not 1 <= args.semantic_max_new_tokens <= 2048:
+        parser.error("--semantic-max-new-tokens must be between 1 and 2048")
     if args.progress_every < 1:
         parser.error("--progress-every must be at least 1")
 
@@ -175,6 +179,13 @@ def main() -> None:
     hit_max_attempts = 0
     closed_tag_attempts = 0
     ended_with_eos_attempts = 0
+    semantic_checks = 0
+    semantic_passes = 0
+    semantic_failures = 0
+    semantic_prompt_tokens = 0
+    semantic_output_tokens = 0
+    semantic_hit_max_tokens = 0
+    semantic_answer_stops = 0
 
     source_examined = 0
     for index, record in enumerate(source_records):
@@ -184,6 +195,7 @@ def main() -> None:
         retry_reasons: tuple[str, ...] = ()
         observed_reasons: set[str] = set()
         framework: list[str] | None = None
+        semantic_verification: dict | None = None
         for _ in range(args.max_attempts):
             attempts_used += 1
             prompt = format_framework_prompt(
@@ -234,14 +246,48 @@ def main() -> None:
                 continue
             result = validate_framework(candidate, record["answer"])
             if result.valid:
-                framework = list(result.steps)
-                break
+                verification = verify_framework_semantics(
+                    model,
+                    tokenizer,
+                    record["question"],
+                    list(result.steps),
+                    record["answer"],
+                    args.semantic_max_new_tokens,
+                )
+                semantic_checks += 1
+                semantic_prompt_tokens += verification.prompt_tokens
+                semantic_output_tokens += verification.generated_tokens
+                semantic_hit_max_tokens += int(verification.hit_max_tokens)
+                semantic_answer_stops += int(verification.stopped_on_answer)
+                if verification.correct:
+                    semantic_passes += 1
+                    framework = list(result.steps)
+                    semantic_verification = {
+                        "correct": True,
+                        "predicted_answer": verification.predicted_answer,
+                        "reference_answer": verification.reference_answer,
+                        "generated_tokens": verification.generated_tokens,
+                        "stopped_on_answer": verification.stopped_on_answer,
+                        "hit_max_tokens": verification.hit_max_tokens,
+                    }
+                    break
+                semantic_failures += 1
+                retry_reasons = ("semantic_solution_mismatch",)
+                observed_reasons.update(retry_reasons)
+                attempt_reason_counts.update(retry_reasons)
+                continue
             retry_reasons = result.reasons
             observed_reasons.update(retry_reasons)
             attempt_reason_counts.update(retry_reasons)
 
         if framework is not None:
-            accepted_records.append({**record, "framework": framework})
+            accepted_records.append(
+                {
+                    **record,
+                    "framework": framework,
+                    "semantic_verification": semantic_verification,
+                }
+            )
         else:
             final_reasons = sorted(observed_reasons or {"generation_failed"})
             reason_counts.update(final_reasons)
@@ -269,7 +315,7 @@ def main() -> None:
     total = source_examined
     invalid = total - len(accepted_records)
     audit = {
-        "schema_version": 2,
+        "schema_version": 3,
         "requested_valid": args.limit,
         "source_examined": source_examined,
         "total": total,
@@ -285,6 +331,14 @@ def main() -> None:
         "hit_max_attempts": hit_max_attempts,
         "closed_tag_attempts": closed_tag_attempts,
         "ended_with_eos_attempts": ended_with_eos_attempts,
+        "semantic_checks": semantic_checks,
+        "semantic_passes": semantic_passes,
+        "semantic_failures": semantic_failures,
+        "semantic_prompt_tokens": semantic_prompt_tokens,
+        "semantic_output_tokens": semantic_output_tokens,
+        "semantic_hit_max_tokens": semantic_hit_max_tokens,
+        "semantic_answer_stops": semantic_answer_stops,
+        "semantic_max_new_tokens": args.semantic_max_new_tokens,
         "max_attempts": args.max_attempts,
         "seed": args.seed,
         "temperature": args.temperature,

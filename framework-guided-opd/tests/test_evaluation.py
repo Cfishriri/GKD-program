@@ -12,17 +12,21 @@ if HAS_EVALUATION_RUNTIME:
     from evaluate_comparison import (
         canonicalize_predictions,
         AnswerLineStoppingCriteria,
+        build_framework_strata,
+        build_comparisons,
         finalize_manifest,
         generate_completion,
         load_adapter_metadata,
         load_framework_cache,
         load_prediction_rows,
         model_identity,
+        ordered_cells,
         pending_records,
         plot_accuracy_vs_cost,
         plot_grouped_accuracy,
         plot_paired_deltas,
         plot_paired_outcomes,
+        prompt_for_condition,
         resolve_project_paths,
         sha256_text,
         stable_framework_id,
@@ -49,6 +53,92 @@ from framework_opd.prompts import format_vanilla_student_prompt
 
 
 class EvaluationTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
+    def test_ablation_cells_cover_same_prompt_controls_and_oracle(self):
+        self.assertEqual(
+            ordered_cells(False),
+            [
+                "vanilla_no_framework",
+                "vanilla_empty_framework",
+                "vanilla_fallback_framework",
+                "vanilla_generated_framework",
+                "vanilla_oracle_framework",
+                "guided_no_framework",
+                "guided_empty_framework",
+                "guided_fallback_framework",
+                "guided_generated_framework",
+                "guided_oracle_framework",
+            ],
+        )
+        generated = {"framework": ["Generated plan"]}
+        oracle = {"framework": ["Oracle plan"]}
+        prompts = {
+            condition: prompt_for_condition(
+                {"question": "question"}, generated, oracle, condition
+            )
+            for condition in (
+                "empty_framework",
+                "fallback_framework",
+                "generated_framework",
+                "oracle_framework",
+            )
+        }
+        system_prefixes = {prompt.split("\n\nProblem:", 1)[0] for prompt in prompts.values()}
+        self.assertEqual(len(system_prefixes), 1)
+        self.assertIn("<framework>\n\n</framework>", prompts["empty_framework"])
+        self.assertIn("Generated plan", prompts["generated_framework"])
+        self.assertIn("Oracle plan", prompts["oracle_framework"])
+        no_framework = prompt_for_condition(
+            {"question": "question"}, generated, oracle, "no_framework"
+        )
+        self.assertNotEqual(
+            no_framework.split("\n\nProblem:", 1)[0], next(iter(system_prefixes))
+        )
+
+    @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
+    def test_framework_strata_report_valid_and_fallback_separately(self):
+        def row(example_id, correct, fallback):
+            return {
+                "example_id": example_id,
+                "correct": correct,
+                "relaxed_correct": correct,
+                "has_answer_marker": True,
+                "stopped_on_answer": True,
+                "shared_framework_failure": fallback,
+                "generated_tokens": 1,
+            }
+
+        rows = {
+            "vanilla_empty_framework": [row(1, True, False), row(2, True, True)],
+            "vanilla_generated_framework": [row(1, False, False), row(2, True, True)],
+            "guided_empty_framework": [row(1, True, False), row(2, False, True)],
+            "guided_generated_framework": [row(1, True, False), row(2, True, True)],
+        }
+        strata = build_framework_strata(rows, seed=7, bootstrap_samples=20)
+        indexed = {(item["adapter"], item["stratum"]): item for item in strata}
+        self.assertEqual(indexed[("vanilla", "valid")]["total"], 1)
+        self.assertEqual(indexed[("vanilla", "fallback")]["total"], 1)
+        self.assertEqual(indexed[("guided", "fallback")]["accuracy_delta"], 1.0)
+
+    @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
+    def test_oracle_comparisons_are_never_primary(self):
+        rows = {
+            cell: [{"example_id": 1, "correct": True}]
+            for cell in ordered_cells(False)
+        }
+        comparisons = build_comparisons(
+            {"seed": 1, "bootstrap_samples": 10, "include_base": False}, rows
+        )
+        oracle_rows = [
+            row
+            for row in comparisons
+            if "oracle" in row.get("baseline", "") or "oracle" in row.get("comparison", "")
+        ]
+        self.assertTrue(oracle_rows)
+        self.assertTrue(
+            all(row["analysis_tier"] == "diagnostic_oracle" for row in oracle_rows)
+        )
+
     def test_truncates_after_first_complete_marked_answer_line(self):
         text = "work\n#### 20\n\nThe total distance is repeated.\n#### 20\n"
         truncated, found = truncate_after_first_complete_answer(text)
@@ -178,6 +268,7 @@ class EvaluationTest(unittest.TestCase):
                 "correct": True,
                 "relaxed_correct": True,
                 "has_answer_marker": True,
+                "stopped_on_answer": True,
                 "ended_with_eos": True,
                 "hit_max_tokens": False,
                 "framework_failure": False,
@@ -187,6 +278,7 @@ class EvaluationTest(unittest.TestCase):
                 "correct": False,
                 "relaxed_correct": True,
                 "has_answer_marker": False,
+                "stopped_on_answer": False,
                 "ended_with_eos": False,
                 "hit_max_tokens": True,
                 "framework_failure": True,
@@ -197,6 +289,7 @@ class EvaluationTest(unittest.TestCase):
         self.assertEqual(summary["accuracy"], 0.5)
         self.assertEqual(summary["relaxed_accuracy"], 1.0)
         self.assertEqual(summary["answer_format_rate"], 0.5)
+        self.assertEqual(summary["answer_stop_rate"], 0.5)
         self.assertEqual(summary["eos_rate"], 0.5)
         self.assertEqual(summary["truncation_rate"], 0.5)
         self.assertEqual(summary["framework_failure_rate"], 0.5)
@@ -562,6 +655,7 @@ class EvaluationTest(unittest.TestCase):
                     "cell": "vanilla_no_framework",
                     "adapter": "vanilla",
                     "framework_condition": "no_framework",
+                    "framework_source": "none",
                     "example_id": record["example_id"],
                     "question": record["question"],
                     "reference": record["answer"],
@@ -587,6 +681,7 @@ class EvaluationTest(unittest.TestCase):
                     "generated_tokens": 1,
                     "ended_with_eos": True,
                     "hit_max_tokens": False,
+                    "stopped_on_answer": False,
                     **score_prediction("#### 1", record["answer"]),
                 }
                 rows.append(row)
@@ -606,22 +701,17 @@ class EvaluationTest(unittest.TestCase):
 
     @unittest.skipUnless(HAS_EVALUATION_RUNTIME, "evaluation runtime dependencies are unavailable")
     def test_plots_and_final_output_inventory_are_created(self):
-        cells = [
-            "vanilla_no_framework",
-            "guided_no_framework",
-            "vanilla_with_framework",
-            "guided_with_framework",
-        ]
+        cells = ordered_cells(False)
         summaries = [
             {
                 "cell": cell,
                 "total": 10,
-                "accuracy": 0.5 + index * 0.05,
+                "accuracy": 0.4 + index * 0.04,
                 "accuracy_ci95_low": 0.3,
                 "accuracy_ci95_high": 0.8,
                 "average_token_cost_proxy": 20 + index * 5,
-                "total_framework_4b_calls": 10 if cell.endswith("with_framework") else 0,
-                "total_framework_latency_seconds": 2.0 if cell.endswith("with_framework") else 0.0,
+                "total_framework_4b_calls": 10 if "generated_framework" in cell else 0,
+                "total_framework_latency_seconds": 2.0 if "generated_framework" in cell else 0.0,
             }
             for index, cell in enumerate(cells)
         ]

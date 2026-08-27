@@ -7,9 +7,9 @@ export PYTHONPATH="$SCRIPT_DIR/src"
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
-framework_data=data/gsm8k_frameworks_v2.jsonl
-generation_audit=data/gsm8k_frameworks_v2.generation-audit.json
-teacher_output=outputs/teacher-framework-adapter-v2
+framework_data=data/gsm8k_frameworks_v3.jsonl
+generation_audit=data/gsm8k_frameworks_v3.generation-audit.json
+teacher_output=outputs/teacher-framework-adapter-v3
 
 if [[ ! -f "$framework_data" || ! -f "$generation_audit" ]]; then
   echo "Missing $framework_data. Run ./run_framework_data.sh first." >&2
@@ -28,6 +28,8 @@ if audit.get("status") != "complete":
     raise SystemExit("framework generation audit is not complete")
 if audit.get("requested_valid") != 1000 or audit.get("valid") != 1000:
     raise SystemExit("framework generation did not publish exactly 1000 valid labels")
+if audit.get("schema_version") != 3 or audit.get("semantic_passes") != 1000:
+    raise SystemExit("framework generation did not semantically verify every label")
 digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
 if audit.get("output_sha256") != digest:
     raise SystemExit("framework data hash does not match its generation audit")
@@ -35,7 +37,7 @@ if audit.get("output_sha256") != digest:
 
 /root/blockdata/kv_cache_env/bin/python audit_framework_data.py \
   --data "$framework_data" \
-  --output data/gsm8k_frameworks_v2.audit.json
+  --output data/gsm8k_frameworks_v3.audit.json
 
 /root/blockdata/kv_cache_env/bin/python train_teacher.py \
   --model /root/eb-public/huggingface-models/Qwen/Qwen3-4B \
