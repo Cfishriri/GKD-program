@@ -48,7 +48,7 @@ data/gsm8k_frameworks_v3.generation-audit.json
 data/gsm8k_frameworks_v3.audit.json
 ```
 
-generation audit 必须满足：`status == complete`、`requested_valid == valid == semantic_passes == 1000`。`semantic_checks` 可以大于 1000，因为失败候选会重试。
+generation audit 必须满足：`status == complete`、`requested_valid == valid == semantic_passes == 100`。`semantic_checks` 可以大于 100，因为失败候选会重试。
 
 ### 2. 训练 v3 Framework Teacher
 

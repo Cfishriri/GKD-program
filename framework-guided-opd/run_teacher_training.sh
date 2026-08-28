@@ -26,9 +26,9 @@ import hashlib, json, sys
 audit = json.load(open(sys.argv[1], encoding="utf-8"))
 if audit.get("status") != "complete":
     raise SystemExit("framework generation audit is not complete")
-if audit.get("requested_valid") != 1000 or audit.get("valid") != 1000:
-    raise SystemExit("framework generation did not publish exactly 1000 valid labels")
-if audit.get("schema_version") != 3 or audit.get("semantic_passes") != 1000:
+if audit.get("requested_valid") != 100 or audit.get("valid") != 100:
+    raise SystemExit("framework generation did not publish exactly 100 valid labels")
+if audit.get("schema_version") != 3 or audit.get("semantic_passes") != 100:
     raise SystemExit("framework generation did not semantically verify every label")
 digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
 if audit.get("output_sha256") != digest:
@@ -48,4 +48,4 @@ if audit.get("output_sha256") != digest:
   --steps 1000 \
   --learning-rate 0.0001 \
   --seed 42 \
-  --expected-records 1000
+  --expected-records 100

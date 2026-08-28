@@ -24,7 +24,7 @@ fi
   --output "$data_path" \
   --audit-output "$generation_audit_path" \
   --device cuda:1 \
-  --limit 1000 \
+  --limit 100 \
   --max-attempts 5 \
   --seed 42 \
   --temperature 0.4 \

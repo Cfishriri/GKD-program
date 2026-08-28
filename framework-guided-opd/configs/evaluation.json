@@ -12,7 +12,7 @@
   "framework_max_new_tokens": 128,
   "framework_max_attempts": 3,
   "framework_generation_temperature": 0.0,
-  "framework_teacher_expected_records": 1000,
+  "framework_teacher_expected_records": 100,
   "framework_failure_policy": "fallback",
   "bootstrap_samples": 10000,
   "progress_every": 10,

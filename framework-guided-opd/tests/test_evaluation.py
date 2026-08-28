@@ -787,7 +787,7 @@ class EvaluationTest(unittest.TestCase):
         self.assertIs(config["resume"], False)
         self.assertGreater(config["bootstrap_samples"], 0)
         self.assertGreater(config["framework_max_attempts"], 0)
-        self.assertEqual(config["framework_teacher_expected_records"], 1000)
+        self.assertEqual(config["framework_teacher_expected_records"], 100)
 
 
 if __name__ == "__main__":
