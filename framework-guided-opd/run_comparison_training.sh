@@ -20,11 +20,11 @@ root = pathlib.Path(sys.argv[1])
 config = verify_teacher_artifact(root)["run_config"]
 if pathlib.Path(config.get("data", "")).name != "gsm8k_frameworks_v3.jsonl":
     raise SystemExit("framework Teacher was not trained from v3 labels")
-if config.get("num_records") != 1000:
-    raise SystemExit("framework Teacher provenance does not contain exactly 1000 labels")
+if config.get("num_records") != 100:
+    raise SystemExit("framework Teacher provenance does not contain exactly 100 labels")
 if config.get("purity_audit", {}).get("invalid") != 0:
     raise SystemExit("framework Teacher provenance failed its purity gate")
-if config.get("generation_audit", {}).get("semantic_passes") != 1000:
+if config.get("generation_audit", {}).get("semantic_passes") != 100:
     raise SystemExit("framework Teacher provenance failed its semantic gate")
 ' "$teacher_output"
 

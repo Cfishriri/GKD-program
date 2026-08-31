@@ -4,6 +4,19 @@ from pathlib import Path
 
 
 class ConfigTest(unittest.TestCase):
+    def test_v3_feasibility_label_count_is_consistent_across_entrypoints(self):
+        root = Path(__file__).parents[1]
+        framework_script = (root / "run_framework_data.sh").read_text(encoding="utf-8")
+        teacher_script = (root / "run_teacher_training.sh").read_text(encoding="utf-8")
+        comparison_script = (root / "run_comparison_training.sh").read_text(encoding="utf-8")
+        evaluation = json.loads((root / "configs/evaluation.json").read_text(encoding="utf-8"))
+
+        self.assertIn("--limit 100", framework_script)
+        self.assertIn("--expected-records 100", teacher_script)
+        self.assertIn('config.get("num_records") != 100', comparison_script)
+        self.assertIn('get("semantic_passes") != 100', comparison_script)
+        self.assertEqual(evaluation["framework_teacher_expected_records"], 100)
+
     def test_runtime_entrypoints_are_relocatable(self):
         root = Path(__file__).parents[1]
         old_root = "/root/blockdata/framework-guided-opd"
