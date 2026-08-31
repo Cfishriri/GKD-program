@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "total": 100,
+  "valid": 100,
+  "invalid": 0,
+  "reasons": {},
+  "leakage_records": 0,
+  "leakage_rate": 0.0,
+  "invalid_examples": [],
+  "data": "data/gsm8k_frameworks_v3.jsonl"
+}

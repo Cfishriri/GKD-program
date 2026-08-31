@@ -1,0 +1,195 @@
+{
+  "schema_version": 3,
+  "requested_valid": 100,
+  "source_examined": 279,
+  "total": 279,
+  "valid": 100,
+  "invalid": 179,
+  "reasons": {
+    "evaluated_equation": 6,
+    "final_answer_leak": 5,
+    "framework_not_closed": 3,
+    "hit_max_tokens": 3,
+    "number_word": 128,
+    "numeric_literal": 149,
+    "parse_error": 14,
+    "semantic_solution_mismatch": 3,
+    "step_count": 19
+  },
+  "leakage_records": 178,
+  "leakage_rate": 0.6379928315412187,
+  "attempt_reasons": {
+    "evaluated_equation": 17,
+    "final_answer_leak": 15,
+    "framework_not_closed": 6,
+    "hit_max_tokens": 6,
+    "number_word": 539,
+    "numeric_literal": 675,
+    "parse_error": 25,
+    "semantic_solution_mismatch": 17,
+    "step_count": 68
+  },
+  "attempts_used": 1051,
+  "prompt_tokens": 404477,
+  "generated_tokens": 201792,
+  "hit_max_attempts": 1051,
+  "closed_tag_attempts": 1045,
+  "ended_with_eos_attempts": 0,
+  "semantic_checks": 117,
+  "semantic_passes": 100,
+  "semantic_failures": 17,
+  "semantic_prompt_tokens": 21513,
+  "semantic_output_tokens": 12285,
+  "semantic_hit_max_tokens": 0,
+  "semantic_answer_stops": 117,
+  "semantic_max_new_tokens": 512,
+  "max_attempts": 5,
+  "seed": 42,
+  "temperature": 0.4,
+  "invalid_examples": [
+    {
+      "index": 1,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 2,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 3,
+      "reasons": [
+        "number_word"
+      ]
+    },
+    {
+      "index": 5,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 7,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 9,
+      "reasons": [
+        "number_word",
+        "numeric_literal",
+        "step_count"
+      ]
+    },
+    {
+      "index": 10,
+      "reasons": [
+        "evaluated_equation",
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 12,
+      "reasons": [
+        "number_word",
+        "numeric_literal",
+        "parse_error"
+      ]
+    },
+    {
+      "index": 14,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 15,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 16,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 17,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 19,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 20,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 22,
+      "reasons": [
+        "number_word"
+      ]
+    },
+    {
+      "index": 25,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 27,
+      "reasons": [
+        "number_word",
+        "step_count"
+      ]
+    },
+    {
+      "index": 28,
+      "reasons": [
+        "number_word"
+      ]
+    },
+    {
+      "index": 29,
+      "reasons": [
+        "evaluated_equation",
+        "number_word",
+        "numeric_literal",
+        "parse_error"
+      ]
+    },
+    {
+      "index": 30,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    }
+  ],
+  "output": "data/gsm8k_frameworks_v3.jsonl",
+  "status": "complete",
+  "data_sha256": "1156ea672eb736c7eb5d86346a35eb9682d800e7edb76d4771e270e398cf09ec",
+  "output_sha256": "1156ea672eb736c7eb5d86346a35eb9682d800e7edb76d4771e270e398cf09ec",
+  "partial_output": null,
+  "partial_sha256": null
+}

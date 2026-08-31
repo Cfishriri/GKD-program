@@ -19,5 +19,5 @@
   "lora_alpha": 16,
   "framework_max_attempts": 3,
   "checkpoint_steps": 128,
-  "resume_from_checkpoint": null
+  "resume_from_checkpoint": "outputs/vanilla-opd-v2/checkpoints/checkpoint-000384"
 }

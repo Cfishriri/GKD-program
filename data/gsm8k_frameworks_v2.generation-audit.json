@@ -1,0 +1,185 @@
+{
+  "schema_version": 2,
+  "requested_valid": 1000,
+  "source_examined": 2412,
+  "total": 2412,
+  "valid": 1000,
+  "invalid": 1412,
+  "reasons": {
+    "evaluated_equation": 66,
+    "final_answer_leak": 43,
+    "framework_not_closed": 12,
+    "hit_max_tokens": 12,
+    "number_word": 1029,
+    "numeric_literal": 1190,
+    "parse_error": 144,
+    "step_count": 110
+  },
+  "leakage_records": 1408,
+  "leakage_rate": 0.5837479270315091,
+  "attempt_reasons": {
+    "evaluated_equation": 168,
+    "final_answer_leak": 113,
+    "framework_not_closed": 19,
+    "hit_max_tokens": 19,
+    "number_word": 4618,
+    "numeric_literal": 5236,
+    "parse_error": 266,
+    "step_count": 323
+  },
+  "attempts_used": 8634,
+  "prompt_tokens": 3261343,
+  "generated_tokens": 1657728,
+  "hit_max_attempts": 8634,
+  "closed_tag_attempts": 8615,
+  "ended_with_eos_attempts": 0,
+  "max_attempts": 5,
+  "seed": 42,
+  "temperature": 0.4,
+  "invalid_examples": [
+    {
+      "index": 1,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 2,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 3,
+      "reasons": [
+        "number_word"
+      ]
+    },
+    {
+      "index": 5,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 7,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 9,
+      "reasons": [
+        "number_word",
+        "numeric_literal",
+        "step_count"
+      ]
+    },
+    {
+      "index": 10,
+      "reasons": [
+        "evaluated_equation",
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 12,
+      "reasons": [
+        "number_word",
+        "numeric_literal",
+        "parse_error"
+      ]
+    },
+    {
+      "index": 14,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 15,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 16,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 17,
+      "reasons": [
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 19,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 22,
+      "reasons": [
+        "number_word"
+      ]
+    },
+    {
+      "index": 24,
+      "reasons": [
+        "numeric_literal",
+        "parse_error"
+      ]
+    },
+    {
+      "index": 25,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 27,
+      "reasons": [
+        "number_word",
+        "step_count"
+      ]
+    },
+    {
+      "index": 28,
+      "reasons": [
+        "number_word"
+      ]
+    },
+    {
+      "index": 29,
+      "reasons": [
+        "evaluated_equation",
+        "number_word",
+        "numeric_literal"
+      ]
+    },
+    {
+      "index": 30,
+      "reasons": [
+        "number_word",
+        "numeric_literal"
+      ]
+    }
+  ],
+  "output": "data/gsm8k_frameworks_v2.jsonl",
+  "status": "complete",
+  "data_sha256": "0f21c93b7489043c009418635a09cb6e41abef0895fc9fe07489958f322ae257",
+  "output_sha256": "0f21c93b7489043c009418635a09cb6e41abef0895fc9fe07489958f322ae257",
+  "partial_output": null,
+  "partial_sha256": null
+}

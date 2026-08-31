@@ -1,0 +1,194 @@
+{
+  "adapter_artifact_sha256": "1684a6fcdc15c7e153e063406ed27afc3a6898aaab33449be79ed1cc2dc8ea20",
+  "completed_at": "2026-08-23T03:35:33.978658+00:00",
+  "created_at": "2026-08-23T03:34:51.657934+00:00",
+  "final_optimizer_step": 1,
+  "final_rollout_step": 1,
+  "initial_runtime": {
+    "configured_devices": {
+      "student": "cuda:0",
+      "teacher": "cuda:1"
+    },
+    "cuda_available": true,
+    "cuda_device_count": 2,
+    "hostname": "cs-d225a-8d1f2-server",
+    "platform": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+    "python": "3.10.16 (main, Dec 11 2024, 16:24:50) [GCC 11.2.0]",
+    "timestamp": "2026-08-23T03:34:51.657988+00:00",
+    "torch": "2.13.0+cu130"
+  },
+  "resume_history": [],
+  "role": "opd_student",
+  "run_config_sha256": "0377cb22d461c3a86c906ef6d50d8ff26ac6dd1dbcca8bcb82f7031db4811563",
+  "run_id": "369dfb85d3c84f668a00ae15799b6c68",
+  "run_signature": {
+    "payload": {
+      "dataset": {
+        "path": "/root/eb-public/huggingface-datasets/openai/gsm8k/main/train-00000-of-00001.parquet",
+        "sha256": "ea82612ea9582142387730c793eb67d3b12849002bc0b7fa6f8efafa7351419d",
+        "size": 2306545
+      },
+      "framework_teacher_adapter": null,
+      "hyperparameters": {
+        "beta": 1.0,
+        "dataset": "/root/eb-public/huggingface-datasets/openai/gsm8k/main/train-00000-of-00001.parquet",
+        "framework_max_attempts": 3,
+        "framework_max_new_tokens": 128,
+        "framework_teacher_adapter": null,
+        "generation_temperature": 0.7,
+        "gradient_accumulation_steps": 1,
+        "learning_rate": 0.0001,
+        "lora_alpha": 16,
+        "lora_r": 8,
+        "max_steps": 1,
+        "seed": 42,
+        "solution_max_new_tokens": 128,
+        "student_model": "/root/eb-public/huggingface-models/Qwen/Qwen3-1.7B",
+        "teacher_model": "/root/eb-public/huggingface-models/Qwen/Qwen3-4B",
+        "temperature": 1.0
+      },
+      "implementation": {
+        "src/framework_opd/data.py": "fdafcac3f021a5f6ca2327bc070573f2059da430adaaad73bb14d5275703eb06",
+        "src/framework_opd/framework_validation.py": "800a821cac908c92be0a06a05e646ea07bdc29048aace72ec616aa8baf994931",
+        "src/framework_opd/loss.py": "4f85015945da1eb0b60968b1001e9bba8bd71a436fe4d5c151082a9ecf2c3bee",
+        "src/framework_opd/masking.py": "26aa087ccbd4c40778a3c4a419ec6697ec9c15827c3bbdf06ab7a7791fcc62e0",
+        "src/framework_opd/prompts.py": "414b790bd87a5501562e0135bc562949b5126d4570eb1eb1afec3f1287aa6b90",
+        "src/framework_opd/rollout.py": "9e5a591dc8ff34483065f31c259e0394477677234fa68cd6e0b3f68db3eebd94",
+        "train_opd.py": "8fa8c7720251d80dc08ce5a6d8bea631caecb5e33162c648a45a25ee5dfc2da4"
+      },
+      "mode": "vanilla",
+      "models": {
+        "student": {
+          "metadata": {
+            "config.json": {
+              "sha256": "1ddb5b89ebc90dcb417a45c213d818577e65976454d29385c8f6140771d95197",
+              "size": 726
+            },
+            "generation_config.json": {
+              "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+              "size": 239
+            },
+            "merges.txt": {
+              "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+              "size": 1671853
+            },
+            "model.safetensors.index.json": {
+              "sha256": "0d660e94b165eb912669a5249dff44b83188c4777a07ddb9611fb78d91b0578d",
+              "size": 25605
+            },
+            "tokenizer.json": {
+              "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+              "size": 11422654
+            },
+            "tokenizer_config.json": {
+              "sha256": "5a7303fcb1a27ede63134a2cbd61d5282c247ca6d769ce4746d4ffa124aedd63",
+              "size": 9675
+            },
+            "vocab.json": {
+              "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+              "size": 2776833
+            }
+          },
+          "other_files": {
+            ".gitattributes": {
+              "mtime_ns": 1745915548000000000,
+              "size": 1570
+            },
+            ".hfd/aria2c_urls.txt": {
+              "mtime_ns": 1746025973000000000,
+              "size": 0
+            },
+            ".hfd/repo_metadata.json": {
+              "mtime_ns": 1745915545000000000,
+              "size": 6190
+            },
+            "README.md": {
+              "mtime_ns": 1746025971000000000,
+              "size": 13876
+            }
+          },
+          "path": "/root/eb-public/huggingface-models/Qwen/Qwen3-1.7B",
+          "weights": {
+            "model-00001-of-00002.safetensors": {
+              "mtime_ns": 1745916569000000000,
+              "size": 3441185608
+            },
+            "model-00002-of-00002.safetensors": {
+              "mtime_ns": 1745916186000000000,
+              "size": 622329984
+            }
+          }
+        },
+        "teacher": {
+          "metadata": {
+            "config.json": {
+              "sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+              "size": 726
+            },
+            "generation_config.json": {
+              "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+              "size": 239
+            },
+            "merges.txt": {
+              "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+              "size": 1671853
+            },
+            "model.safetensors.index.json": {
+              "sha256": "6dc0981b8829fead746441f68f38f24c5ca4a3a66351f652c26c6df0efc43ab2",
+              "size": 32819
+            },
+            "tokenizer.json": {
+              "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+              "size": 11422654
+            },
+            "tokenizer_config.json": {
+              "sha256": "5a7303fcb1a27ede63134a2cbd61d5282c247ca6d769ce4746d4ffa124aedd63",
+              "size": 9675
+            },
+            "vocab.json": {
+              "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+              "size": 2776833
+            }
+          },
+          "other_files": {
+            ".gitattributes": {
+              "mtime_ns": 1745914295000000000,
+              "size": 1570
+            },
+            ".hfd/aria2c_urls.txt": {
+              "mtime_ns": 1746025969000000000,
+              "size": 0
+            },
+            ".hfd/repo_metadata.json": {
+              "mtime_ns": 1745914291000000000,
+              "size": 6353
+            },
+            "README.md": {
+              "mtime_ns": 1746025965000000000,
+              "size": 16770
+            }
+          },
+          "path": "/root/eb-public/huggingface-models/Qwen/Qwen3-4B",
+          "weights": {
+            "model-00001-of-00003.safetensors": {
+              "mtime_ns": 1745915564000000000,
+              "size": 3957900840
+            },
+            "model-00002-of-00003.safetensors": {
+              "mtime_ns": 1745915476000000000,
+              "size": 3987450520
+            },
+            "model-00003-of-00003.safetensors": {
+              "mtime_ns": 1745914360000000000,
+              "size": 99630640
+            }
+          }
+        }
+      },
+      "schema_version": 2
+    },
+    "sha256": "1f1449619b463f908197b16d761e909e8800299c9f9e10092a5e5d365acd92f5"
+  },
+  "schema_version": 2,
+  "status": "complete"
+}
