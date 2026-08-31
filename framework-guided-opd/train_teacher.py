@@ -121,6 +121,19 @@ def validate_generation_audit(
         raise ValueError("generation audit output path does not identify the training data")
     if audit.get("partial_output"):
         raise ValueError("complete generation audit must not reference a partial output")
+    semantic_checks = audit.get("semantic_checks")
+    semantic_passes = audit.get("semantic_passes")
+    semantic_failures = audit.get("semantic_failures")
+    if (
+        audit.get("schema_version") != 3
+        or not isinstance(semantic_checks, int)
+        or semantic_checks < actual_records
+        or semantic_passes != actual_records
+        or semantic_failures != semantic_checks - semantic_passes
+    ):
+        raise ValueError(
+            "generation audit semantic counts must prove every published label passed"
+        )
     return audit
 
 
@@ -251,6 +264,9 @@ def load_framework_training_records(
 
     clean_records: list[dict] = []
     for record in records:
+        semantic = record.get("semantic_verification")
+        if not isinstance(semantic, dict) or semantic.get("correct") is not True:
+            raise ValueError("framework training record is missing successful semantic verification")
         clean_records.append(
             {
                 **record,
@@ -359,6 +375,9 @@ def main() -> None:
             "requested_valid": generation_audit["requested_valid"],
             "valid": generation_audit["valid"],
             "output_sha256": generation_audit["output_sha256"],
+            "semantic_checks": generation_audit["semantic_checks"],
+            "semantic_passes": generation_audit["semantic_passes"],
+            "semantic_failures": generation_audit["semantic_failures"],
         },
         "purity_audit": purity_audit,
         "steps": args.steps,

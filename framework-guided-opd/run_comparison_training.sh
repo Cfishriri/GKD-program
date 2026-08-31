@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /root/blockdata/framework-guided-opd
-export PYTHONPATH=$PWD/src
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+export PYTHONPATH="$SCRIPT_DIR/src"
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
 python_bin=/root/blockdata/kv_cache_env/bin/python
-teacher_output=outputs/teacher-framework-adapter-v2
+teacher_output=outputs/teacher-framework-adapter-v3
 if [[ ! -f "$teacher_output/adapter_model.safetensors" || ! -f "$teacher_output/RUN_COMPLETE" ]]; then
-  echo "Missing completed v2 framework-teacher adapter. Run ./run_teacher_training.sh first." >&2
+  echo "Missing completed v3 framework-teacher adapter. Run ./run_teacher_training.sh first." >&2
   exit 1
 fi
 "$python_bin" -c '
@@ -17,12 +18,14 @@ import pathlib, sys
 from train_teacher import verify_teacher_artifact
 root = pathlib.Path(sys.argv[1])
 config = verify_teacher_artifact(root)["run_config"]
-if pathlib.Path(config.get("data", "")).name != "gsm8k_frameworks_v2.jsonl":
-    raise SystemExit("framework Teacher was not trained from v2 labels")
-if config.get("num_records") != 1000:
-    raise SystemExit("framework Teacher provenance does not contain exactly 1000 labels")
+if pathlib.Path(config.get("data", "")).name != "gsm8k_frameworks_v3.jsonl":
+    raise SystemExit("framework Teacher was not trained from v3 labels")
+if config.get("num_records") != 100:
+    raise SystemExit("framework Teacher provenance does not contain exactly 100 labels")
 if config.get("purity_audit", {}).get("invalid") != 0:
     raise SystemExit("framework Teacher provenance failed its purity gate")
+if config.get("generation_audit", {}).get("semantic_passes") != 100:
+    raise SystemExit("framework Teacher provenance failed its semantic gate")
 ' "$teacher_output"
 
 verify_completed_arm() {
@@ -74,7 +77,7 @@ print(json.load(open(sys.argv[1], encoding="utf-8")).get("resume_from_checkpoint
 
   if [[ -f "$output_path/RUN_COMPLETE" && -f "$adapter_path" && -f "$output_path/run_config.json" && -f "$output_path/run_manifest.json" ]]; then
     verify_completed_arm "$config_path" "$output_path"
-    echo "$label OPD v2 arm is already complete and provenance-matched; skipping."
+    echo "$label OPD v3 arm is already complete and provenance-matched; skipping."
     return
   fi
 
@@ -97,5 +100,5 @@ print(json.load(open(sys.argv[1], encoding="utf-8")).get("resume_from_checkpoint
   "$python_bin" train_opd.py --config "$config_path"
 }
 
-run_arm "Vanilla" configs/vanilla_opd.json outputs/vanilla-opd-v2
-run_arm "Guided" configs/guided_opd.json outputs/guided-opd-v2
+run_arm "Vanilla" configs/vanilla_opd_v3.json outputs/vanilla-opd-v3
+run_arm "Guided" configs/guided_opd_v3.json outputs/guided-opd-v3

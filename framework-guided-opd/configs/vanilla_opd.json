@@ -3,7 +3,7 @@
   "student_model": "/root/eb-public/huggingface-models/Qwen/Qwen3-1.7B",
   "teacher_model": "/root/eb-public/huggingface-models/Qwen/Qwen3-4B",
   "dataset": "/root/eb-public/huggingface-datasets/openai/gsm8k/main/train-00000-of-00001.parquet",
-  "output_dir": "/root/blockdata/framework-guided-opd/outputs/vanilla-opd-v2",
+  "output_dir": "outputs/vanilla-opd-v2",
   "student_device": "cuda:0",
   "teacher_device": "cuda:1",
   "seed": 42,
@@ -19,5 +19,5 @@
   "lora_alpha": 16,
   "framework_max_attempts": 3,
   "checkpoint_steps": 128,
-  "resume_from_checkpoint": null
+  "resume_from_checkpoint": "outputs/vanilla-opd-v2/checkpoints/checkpoint-000384"
 }

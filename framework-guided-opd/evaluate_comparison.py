@@ -18,8 +18,12 @@ import peft
 import torch
 import transformers
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteriaList
 
+from framework_opd.answer_stopping import (
+    AnswerLineStoppingCriteria,
+    truncate_after_first_complete_answer,
+)
 from framework_opd.data import load_records
 from framework_opd.evaluation import (
     artifact_fingerprint,
@@ -35,16 +39,23 @@ from framework_opd.prompts import format_student_prompt, format_vanilla_student_
 from framework_opd.rollout import FALLBACK_FRAMEWORK, GenerationResult, generate_framework_result
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+FRAMEWORK_CONDITIONS = (
+    "no_framework",
+    "empty_framework",
+    "fallback_framework",
+    "generated_framework",
+    "oracle_framework",
+)
 CORE_CELL_ORDER = [
-    "vanilla_no_framework",
-    "guided_no_framework",
-    "vanilla_with_framework",
-    "guided_with_framework",
+    f"{adapter}_{condition}"
+    for adapter in ("vanilla", "guided")
+    for condition in FRAMEWORK_CONDITIONS
 ]
 SOURCE_FILES = [
     "evaluate_comparison.py",
     "src/framework_opd/data.py",
+    "src/framework_opd/answer_stopping.py",
     "src/framework_opd/evaluation.py",
     "src/framework_opd/framework_validation.py",
     "src/framework_opd/prompts.py",
@@ -156,6 +167,9 @@ def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> G
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            stopping_criteria=StoppingCriteriaList(
+                [AnswerLineStoppingCriteria(tokenizer, encoded["input_ids"].shape[1])]
+            ),
         )
     generated = output_ids[0, encoded["input_ids"].shape[1] :].detach().cpu().tolist()
     token_ids = tuple(int(token_id) for token_id in generated)
@@ -167,12 +181,17 @@ def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> G
     else:
         eos_token_ids = tuple(eos_token_ids)
     ended_with_eos = bool(token_ids and token_ids[-1] in eos_token_ids)
+    decoded_text = tokenizer.decode(token_ids, skip_special_tokens=True)
+    truncated_text, stopped_on_answer = truncate_after_first_complete_answer(decoded_text)
     return GenerationResult(
         token_ids=token_ids,
-        text=tokenizer.decode(token_ids, skip_special_tokens=True),
+        text=truncated_text,
         ended_with_eos=ended_with_eos,
-        hit_max_tokens=len(token_ids) >= max_new_tokens and not ended_with_eos,
+        hit_max_tokens=(
+            len(token_ids) >= max_new_tokens and not ended_with_eos and not stopped_on_answer
+        ),
         prompt_tokens=int(encoded["input_ids"].shape[1]),
+        stopped_on_answer=stopped_on_answer,
     )
 
 
@@ -190,6 +209,7 @@ def validate_config(config: dict) -> None:
         "max_new_tokens",
         "framework_max_new_tokens",
         "framework_max_attempts",
+        "framework_generation_temperature",
         "framework_teacher_expected_records",
         "bootstrap_samples",
         "adapters",
@@ -212,6 +232,15 @@ def validate_config(config: dict) -> None:
         value = config.get(key, 1)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{key} must be a positive integer")
+    if config["max_new_tokens"] > 2048:
+        raise ValueError("max_new_tokens must not exceed 2048")
+    framework_temperature = config["framework_generation_temperature"]
+    if (
+        not isinstance(framework_temperature, (int, float))
+        or isinstance(framework_temperature, bool)
+        or framework_temperature < 0
+    ):
+        raise ValueError("framework_generation_temperature must be a non-negative number")
     if not isinstance(config["seed"], int) or isinstance(config["seed"], bool):
         raise ValueError("seed must be an integer")
     if config.get("framework_failure_policy", "fallback") not in {"fallback", "error"}:
@@ -608,11 +637,13 @@ def generate_framework_cache(
     framework_adapter_sha256: str,
     *,
     resume: bool,
+    cache_name: str = "framework_cache.jsonl",
+    oracle: bool = False,
 ) -> tuple[dict[int, dict], dict]:
     policy = config.get("framework_failure_policy", "fallback")
     max_attempts = int(config["framework_max_attempts"])
     progress_every = int(config.get("progress_every", 10))
-    cache_path = output_dir / "framework_cache.jsonl"
+    cache_path = output_dir / cache_name
     cache = (
         load_framework_cache(cache_path, records, framework_adapter_sha256) if resume else {}
     )
@@ -623,10 +654,14 @@ def generate_framework_cache(
     framework_base = framework_teacher = None
     if missing_records:
         framework_base = load_causal_model(config["teacher_model"], config["teacher_device"])
-        framework_teacher = PeftModel.from_pretrained(
-            framework_base,
-            config["framework_teacher_adapter"],
-            is_trainable=False,
+        framework_teacher = (
+            framework_base
+            if oracle
+            else PeftModel.from_pretrained(
+                framework_base,
+                config["framework_teacher_adapter"],
+                is_trainable=False,
+            )
         )
         framework_teacher.eval()
 
@@ -638,8 +673,9 @@ def generate_framework_cache(
                 tokenizer,
                 record["question"],
                 max_new_tokens=config["framework_max_new_tokens"],
-                temperature=0.0,
+                temperature=float(config["framework_generation_temperature"]),
                 max_attempts=max_attempts,
+                reference_answer=record["answer"] if oracle else None,
             )
             latency = time.perf_counter() - started
             framework = list(result.steps)
@@ -668,6 +704,9 @@ def generate_framework_cache(
                 "framework_hit_max_attempts": int(result.hit_max_attempts),
                 "framework_last_ended_with_eos": bool(result.last_ended_with_eos),
                 "framework_closed_tag": bool(result.closed_tag),
+                "framework_source": (
+                    "oracle_reference_aware" if oracle else "generated_answer_blind"
+                ),
             }
             cache[record["example_id"]] = entry
             stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -675,7 +714,8 @@ def generate_framework_cache(
             completed = len(cache)
             if position == 1 or completed == len(records) or position % progress_every == 0:
                 failures = sum(bool(item["framework_failure"]) for item in cache.values())
-                print(f"[frameworks] {completed}/{len(records)} (fallbacks={failures})", flush=True)
+                label = "oracle-frameworks" if oracle else "generated-frameworks"
+                print(f"[{label}] {completed}/{len(records)} (fallbacks={failures})", flush=True)
 
     if framework_teacher is not None:
         del framework_teacher
@@ -702,6 +742,7 @@ def generate_framework_cache(
         "closed_tag_rate": closed / len(records) if records else 0.0,
         "failure_policy": policy,
         "max_attempts": max_attempts,
+        "framework_source": "oracle_reference_aware" if oracle else "generated_answer_blind",
     }
 
 
@@ -719,18 +760,38 @@ def model_specs(config: dict) -> list[tuple[str, str | None]]:
 
 
 def ordered_cells(include_base: bool) -> list[str]:
-    cells = list(CORE_CELL_ORDER)
-    if include_base:
-        cells = ["base_no_framework", "base_with_framework", *cells]
-    return cells
+    adapters = ["base", "vanilla", "guided"] if include_base else ["vanilla", "guided"]
+    return [f"{adapter}_{condition}" for adapter in adapters for condition in FRAMEWORK_CONDITIONS]
 
 
-def prompt_for_cell(record: dict, cache_entry: dict, use_framework: bool) -> str:
-    return (
-        format_student_prompt(record["question"], cache_entry["framework"])
-        if use_framework
-        else format_vanilla_student_prompt(record["question"])
-    )
+def framework_for_condition(
+    generated_entry: dict,
+    oracle_entry: dict,
+    condition: str,
+) -> tuple[list[str], dict | None, str]:
+    if condition == "no_framework":
+        return [], None, "none"
+    if condition == "empty_framework":
+        return [], None, "empty_control"
+    if condition == "fallback_framework":
+        return list(FALLBACK_FRAMEWORK), None, "fixed_fallback_control"
+    if condition == "generated_framework":
+        return list(generated_entry["framework"]), generated_entry, "generated_answer_blind"
+    if condition == "oracle_framework":
+        return list(oracle_entry["framework"]), oracle_entry, "oracle_reference_aware"
+    raise ValueError(f"unsupported framework condition: {condition}")
+
+
+def prompt_for_condition(
+    record: dict,
+    generated_entry: dict,
+    oracle_entry: dict,
+    condition: str,
+) -> str:
+    framework, _, _ = framework_for_condition(generated_entry, oracle_entry, condition)
+    if condition == "no_framework":
+        return format_vanilla_student_prompt(record["question"])
+    return format_student_prompt(record["question"], framework)
 
 
 def pending_records(records: list[dict], existing_rows: list[dict]) -> list[dict]:
@@ -745,12 +806,21 @@ def pending_records(records: list[dict], existing_rows: list[dict]) -> list[dict
     return [record for record in records if record["example_id"] not in completed]
 
 
+def split_cell(cell: str) -> tuple[str, str]:
+    for condition in FRAMEWORK_CONDITIONS:
+        suffix = "_" + condition
+        if cell.endswith(suffix):
+            return cell[: -len(suffix)], condition
+    raise ValueError(f"unsupported evaluation cell: {cell}")
+
+
 def load_prediction_rows(
     path: Path,
     records: list[dict],
     framework_cache: dict[int, dict],
     expected_cells: list[str],
     tokenizer=None,
+    oracle_framework_cache: dict[int, dict] | None = None,
 ) -> dict[str, list[dict]]:
     grouped: dict[str, dict[int, dict]] = {cell: {} for cell in expected_cells}
     if not path.exists():
@@ -760,6 +830,7 @@ def load_prediction_rows(
         "cell",
         "adapter",
         "framework_condition",
+        "framework_source",
         "example_id",
         "question",
         "reference",
@@ -785,6 +856,7 @@ def load_prediction_rows(
         "generated_tokens",
         "ended_with_eos",
         "hit_max_tokens",
+        "stopped_on_answer",
     }
     for row in read_jsonl(path, allow_truncated_final_line=True):
         missing = required - set(row)
@@ -799,44 +871,48 @@ def load_prediction_rows(
         if example_id in grouped[cell]:
             raise ValueError(f"predictions contain duplicate cell/example_id: {cell}/{example_id}")
         record = expected_records[example_id]
-        cached = framework_cache[example_id]
+        generated_entry = framework_cache[example_id]
+        oracle_entry = (oracle_framework_cache or framework_cache)[example_id]
         if row["question"] != record["question"] or row["reference"] != record["answer"]:
             raise ValueError(f"prediction source mismatch for {cell}/{example_id}")
-        use_framework = cell.endswith("_with_framework")
-        adapter = cell.removesuffix("_with_framework").removesuffix("_no_framework")
-        condition = "with_framework" if use_framework else "no_framework"
+        adapter, condition = split_cell(cell)
+        use_framework = condition != "no_framework"
         if row["adapter"] != adapter or row["framework_condition"] != condition:
             raise ValueError(f"prediction cell mapping mismatch for {cell}/{example_id}")
         if bool(row["framework_used"]) != use_framework:
             raise ValueError(f"prediction framework usage mismatch for {cell}/{example_id}")
-        expected_framework = cached["framework"] if use_framework else []
-        expected_framework_id = cached["framework_id"] if use_framework else None
+        expected_framework, source_entry, source = framework_for_condition(
+            generated_entry, oracle_entry, condition
+        )
+        expected_framework_id = source_entry["framework_id"] if source_entry else None
         if row["framework"] != expected_framework or row["framework_id"] != expected_framework_id:
             raise ValueError(f"prediction framework mismatch for {cell}/{example_id}")
-        if row["shared_framework_id"] != cached["framework_id"]:
+        if row["framework_source"] != source:
+            raise ValueError(f"prediction framework source mismatch for {cell}/{example_id}")
+        if row["shared_framework_id"] != generated_entry["framework_id"]:
             raise ValueError(f"prediction shared framework mismatch for {cell}/{example_id}")
-        actual_failure = bool(cached["framework_failure"]) if use_framework else False
+        actual_failure = bool(source_entry["framework_failure"]) if source_entry else False
         if bool(row["framework_failure"]) != actual_failure:
             raise ValueError(f"prediction actual framework failure mismatch for {cell}/{example_id}")
-        if bool(row["shared_framework_failure"]) != bool(cached["framework_failure"]):
+        if bool(row["shared_framework_failure"]) != bool(generated_entry["framework_failure"]):
             raise ValueError(f"prediction shared framework failure mismatch for {cell}/{example_id}")
-        if int(row["shared_framework_attempts"]) != int(cached["framework_attempts"]):
+        if int(row["shared_framework_attempts"]) != int(generated_entry["framework_attempts"]):
             raise ValueError(f"prediction shared framework attempts mismatch for {cell}/{example_id}")
-        if int(row["shared_framework_hit_max_attempts"]) != int(cached["framework_hit_max_attempts"]):
+        if int(row["shared_framework_hit_max_attempts"]) != int(generated_entry["framework_hit_max_attempts"]):
             raise ValueError(f"prediction shared framework truncation mismatch for {cell}/{example_id}")
-        if bool(row["shared_framework_closed_tag"]) != bool(cached["framework_closed_tag"]):
+        if bool(row["shared_framework_closed_tag"]) != bool(generated_entry["framework_closed_tag"]):
             raise ValueError(f"prediction shared framework closure mismatch for {cell}/{example_id}")
-        prompt = prompt_for_cell(record, cached, use_framework)
+        prompt = prompt_for_condition(record, generated_entry, oracle_entry, condition)
         if row["student_prompt_sha256"] != sha256_text(prompt):
             raise ValueError(f"prediction prompt hash mismatch for {cell}/{example_id}")
         if tokenizer is not None:
             prompt_tokens = len(tokenizer(prompt, add_special_tokens=True)["input_ids"])
             if int(row["student_prompt_tokens"]) != prompt_tokens:
                 raise ValueError(f"prediction prompt token count mismatch for {cell}/{example_id}")
-        framework_prompt_tokens = int(cached["framework_prompt_tokens"]) if use_framework else 0
-        framework_output_tokens = int(cached["framework_output_tokens"]) if use_framework else 0
-        framework_latency = float(cached["framework_latency_seconds"]) if use_framework else 0.0
-        framework_calls = int(cached["framework_attempts"]) if use_framework else 0
+        framework_prompt_tokens = int(source_entry["framework_prompt_tokens"]) if source_entry else 0
+        framework_output_tokens = int(source_entry["framework_output_tokens"]) if source_entry else 0
+        framework_latency = float(source_entry["framework_latency_seconds"]) if source_entry else 0.0
+        framework_calls = int(source_entry["framework_attempts"]) if source_entry else 0
         if int(row["framework_prompt_tokens"]) != framework_prompt_tokens:
             raise ValueError(f"prediction framework prompt cost mismatch for {cell}/{example_id}")
         if int(row["framework_output_tokens"]) != framework_output_tokens:
@@ -870,6 +946,7 @@ def evaluate_cells(
     tokenizer,
     records: list[dict],
     framework_cache: dict[int, dict],
+    oracle_framework_cache: dict[int, dict],
     output_dir: Path,
     manifest: dict,
     *,
@@ -879,7 +956,14 @@ def evaluate_cells(
     predictions_path = output_dir / "predictions.jsonl"
     cell_order = ordered_cells(bool(config.get("include_base", False)))
     rows_by_cell = (
-        load_prediction_rows(predictions_path, records, framework_cache, cell_order, tokenizer)
+        load_prediction_rows(
+            predictions_path,
+            records,
+            framework_cache,
+            cell_order,
+            tokenizer,
+            oracle_framework_cache,
+        )
         if resume
         else {cell: [] for cell in cell_order}
     )
@@ -897,55 +981,61 @@ def evaluate_cells(
 
     with predictions_path.open("a", encoding="utf-8") as stream:
         for adapter_name, adapter_path in model_specs(config):
-            cells = [f"{adapter_name}_no_framework", f"{adapter_name}_with_framework"]
+            cells = [f"{adapter_name}_{condition}" for condition in FRAMEWORK_CONDITIONS]
             pending_by_cell = {
                 cell: pending_records(records, rows_by_cell[cell]) for cell in cells
             }
             if not any(pending_by_cell.values()):
-                print(f"[{adapter_name}] reusing two completed cells", flush=True)
+                print(f"[{adapter_name}] reusing completed ablation cells", flush=True)
                 continue
             model = load_causal_model(config["student_model"], config["student_device"])
             if adapter_path:
                 model = PeftModel.from_pretrained(model, adapter_path, is_trainable=False)
             model.eval()
             for cell in cells:
-                use_framework = cell.endswith("_with_framework")
-                condition = "with_framework" if use_framework else "no_framework"
+                _, condition = split_cell(cell)
+                use_framework = condition != "no_framework"
                 missing = pending_by_cell[cell]
                 existing_count = len(rows_by_cell[cell])
                 for position, record in enumerate(missing, 1):
-                    cached = framework_cache[record["example_id"]]
-                    framework = cached["framework"] if use_framework else []
-                    prompt = prompt_for_cell(record, cached, use_framework)
+                    generated_entry = framework_cache[record["example_id"]]
+                    oracle_entry = oracle_framework_cache[record["example_id"]]
+                    framework, source_entry, framework_source = framework_for_condition(
+                        generated_entry, oracle_entry, condition
+                    )
+                    prompt = prompt_for_condition(
+                        record, generated_entry, oracle_entry, condition
+                    )
                     started = time.perf_counter()
                     generated = generate_completion(model, tokenizer, prompt, config["max_new_tokens"])
                     student_latency = time.perf_counter() - started
                     prompt_tokens = int(generated.prompt_tokens)
                     output_tokens = len(generated.token_ids)
-                    framework_prompt_tokens = int(cached["framework_prompt_tokens"]) if use_framework else 0
-                    framework_output_tokens = int(cached["framework_output_tokens"]) if use_framework else 0
-                    framework_latency = float(cached["framework_latency_seconds"]) if use_framework else 0.0
-                    framework_calls = int(cached["framework_attempts"]) if use_framework else 0
+                    framework_prompt_tokens = int(source_entry["framework_prompt_tokens"]) if source_entry else 0
+                    framework_output_tokens = int(source_entry["framework_output_tokens"]) if source_entry else 0
+                    framework_latency = float(source_entry["framework_latency_seconds"]) if source_entry else 0.0
+                    framework_calls = int(source_entry["framework_attempts"]) if source_entry else 0
                     row = {
                         "cell": cell,
                         "adapter": adapter_name,
                         "framework_condition": condition,
+                        "framework_source": framework_source,
                         "example_id": record["example_id"],
                         "question": record["question"],
                         "reference": record["answer"],
                         "framework": framework,
-                        "framework_id": cached["framework_id"] if use_framework else None,
-                        "shared_framework_id": cached["framework_id"],
+                        "framework_id": source_entry["framework_id"] if source_entry else None,
+                        "shared_framework_id": generated_entry["framework_id"],
                         "framework_used": use_framework,
-                        "framework_valid": cached["framework_valid"] if use_framework else None,
-                        "framework_failure": bool(cached["framework_failure"]) if use_framework else False,
-                        "framework_fallback": bool(cached["framework_fallback"]) if use_framework else False,
-                        "framework_attempts": int(cached["framework_attempts"]) if use_framework else 0,
-                        "framework_validation_errors": cached["framework_validation_errors"] if use_framework else [],
-                        "shared_framework_failure": bool(cached["framework_failure"]),
-                        "shared_framework_attempts": int(cached["framework_attempts"]),
-                        "shared_framework_hit_max_attempts": int(cached["framework_hit_max_attempts"]),
-                        "shared_framework_closed_tag": bool(cached["framework_closed_tag"]),
+                        "framework_valid": bool(source_entry["framework_valid"]) if source_entry else None,
+                        "framework_failure": bool(source_entry["framework_failure"]) if source_entry else False,
+                        "framework_fallback": bool(source_entry["framework_fallback"]) if source_entry else False,
+                        "framework_attempts": int(source_entry["framework_attempts"]) if source_entry else 0,
+                        "framework_validation_errors": source_entry["framework_validation_errors"] if source_entry else [],
+                        "shared_framework_failure": bool(generated_entry["framework_failure"]),
+                        "shared_framework_attempts": int(generated_entry["framework_attempts"]),
+                        "shared_framework_hit_max_attempts": int(generated_entry["framework_hit_max_attempts"]),
+                        "shared_framework_closed_tag": bool(generated_entry["framework_closed_tag"]),
                         "prediction": generated.text,
                         "student_prompt_sha256": sha256_text(prompt),
                         "student_prompt_tokens": prompt_tokens,
@@ -962,6 +1052,7 @@ def evaluate_cells(
                         "generated_tokens": output_tokens,
                         "ended_with_eos": generated.ended_with_eos,
                         "hit_max_tokens": generated.hit_max_tokens,
+                        "stopped_on_answer": generated.stopped_on_answer,
                         **score_prediction(generated.text, record["answer"]),
                     }
                     rows_by_cell[cell].append(row)
@@ -991,7 +1082,7 @@ def write_accuracy(
         output_dir / "summary.json",
         {
             "metric": "strict exact match from the last non-empty physical `#### number` line",
-            "token_cost_proxy": "student prompt + student output; with-framework also adds all 4B framework-attempt prompt and output tokens",
+            "token_cost_proxy": "student prompt + student output; generated/oracle conditions also add their own 4B framework-attempt prompt and output tokens",
             "cells": summaries,
         },
     )
@@ -999,50 +1090,73 @@ def write_accuracy(
 
 
 def build_comparisons(config: dict, rows_by_cell: dict[str, list[dict]]) -> list[dict]:
-    definitions = [
+    definitions = []
+    for condition in FRAMEWORK_CONDITIONS:
+        tier = (
+            "diagnostic_oracle"
+            if condition == "oracle_framework"
+            else "primary"
+            if condition in {"no_framework", "generated_framework"}
+            else "ablation"
+        )
+        definitions.append(
+            (
+                f"guided_minus_vanilla_{condition}",
+                f"vanilla_{condition}",
+                f"guided_{condition}",
+                tier,
+                f"guided-vs-vanilla adapter effect under identical {condition} inference",
+            )
+        )
+    for adapter in ("vanilla", "guided"):
+        definitions.extend(
+            [
+                (
+                    f"system_prompt_effect_on_{adapter}",
+                    f"{adapter}_no_framework",
+                    f"{adapter}_empty_framework",
+                    "ablation",
+                    "framework-conditioned system instruction effect with no framework text",
+                ),
+                (
+                    f"fallback_text_effect_on_{adapter}",
+                    f"{adapter}_empty_framework",
+                    f"{adapter}_fallback_framework",
+                    "ablation",
+                    "fixed fallback text effect under an identical system instruction",
+                ),
+                (
+                    f"generated_text_effect_on_{adapter}",
+                    f"{adapter}_empty_framework",
+                    f"{adapter}_generated_framework",
+                    "primary" if adapter == "guided" else "ablation",
+                    "answer-blind generated framework text effect under an identical system instruction",
+                ),
+                (
+                    f"oracle_text_effect_on_{adapter}",
+                    f"{adapter}_empty_framework",
+                    f"{adapter}_oracle_framework",
+                    "diagnostic_oracle",
+                    "reference-aware oracle framework upper bound; not deployable",
+                ),
+            ]
+        )
+    definitions.append(
         (
-            "guided_minus_vanilla_no_framework",
+            "guided_generated_system_minus_vanilla_no_framework",
             "vanilla_no_framework",
-            "guided_no_framework",
-            "primary",
-            "guided-vs-vanilla adapter effect under the same no-framework inference prompt",
-        ),
-        (
-            "guided_minus_vanilla_with_framework",
-            "vanilla_with_framework",
-            "guided_with_framework",
-            "primary",
-            "guided-vs-vanilla adapter effect under the same shared framework-conditioned prompt",
-        ),
-        (
-            "framework_effect_on_vanilla",
-            "vanilla_no_framework",
-            "vanilla_with_framework",
-            "exploratory",
-            "framework-conditioned prompt bundle effect (framework text plus different system instruction) on vanilla",
-        ),
-        (
-            "framework_effect_on_guided",
-            "guided_no_framework",
-            "guided_with_framework",
-            "exploratory",
-            "framework-conditioned prompt bundle effect (framework text plus different system instruction) on guided",
-        ),
-        (
-            "guided_system_minus_vanilla_system",
-            "vanilla_no_framework",
-            "guided_with_framework",
+            "guided_generated_framework",
             "system",
-            "full guided system bundle versus full vanilla system bundle",
-        ),
-    ]
+            "full deployable guided system versus traditional vanilla no-framework system",
+        )
+    )
     if config.get("include_base", False):
         definitions.extend(
             [
                 ("vanilla_minus_base_no_framework", "base_no_framework", "vanilla_no_framework", "exploratory", "vanilla adapter effect versus base under no-framework inference"),
                 ("guided_minus_base_no_framework", "base_no_framework", "guided_no_framework", "exploratory", "guided adapter effect versus base under no-framework inference"),
-                ("vanilla_minus_base_with_framework", "base_with_framework", "vanilla_with_framework", "exploratory", "vanilla adapter effect versus base under shared framework-conditioned inference"),
-                ("guided_minus_base_with_framework", "base_with_framework", "guided_with_framework", "exploratory", "guided adapter effect versus base under shared framework-conditioned inference"),
+                ("vanilla_minus_base_generated_framework", "base_generated_framework", "vanilla_generated_framework", "exploratory", "vanilla adapter effect versus base under generated framework inference"),
+                ("guided_minus_base_generated_framework", "base_generated_framework", "guided_generated_framework", "exploratory", "guided adapter effect versus base under generated framework inference"),
             ]
         )
     comparisons = []
@@ -1059,22 +1173,114 @@ def build_comparisons(config: dict, rows_by_cell: dict[str, list[dict]]) -> list
             {"name": name, "analysis_tier": tier, "estimand": estimand, **result}
         )
     interaction = paired_interaction(
-        rows_by_cell["vanilla_no_framework"],
-        rows_by_cell["guided_no_framework"],
-        rows_by_cell["vanilla_with_framework"],
-        rows_by_cell["guided_with_framework"],
+        rows_by_cell["vanilla_empty_framework"],
+        rows_by_cell["guided_empty_framework"],
+        rows_by_cell["vanilla_generated_framework"],
+        rows_by_cell["guided_generated_framework"],
         seed=int(config["seed"]) + len(definitions),
         bootstrap_samples=int(config["bootstrap_samples"]),
     )
     comparisons.append(
         {
-            "name": "adapter_framework_interaction",
+            "name": "adapter_generated_framework_text_interaction",
             "analysis_tier": "exploratory",
-            "estimand": "difference-in-differences for adapter by framework-conditioned prompt bundle",
+            "estimand": "difference-in-differences for adapter by generated framework text under a fixed system prompt",
             **interaction,
         }
     )
     return comparisons
+
+
+def build_framework_strata(
+    rows_by_cell: dict[str, list[dict]], *, seed: int, bootstrap_samples: int
+) -> list[dict]:
+    results = []
+    for adapter_offset, adapter in enumerate(("vanilla", "guided")):
+        empty_by_id = {
+            row["example_id"]: row for row in rows_by_cell[f"{adapter}_empty_framework"]
+        }
+        generated_rows = rows_by_cell[f"{adapter}_generated_framework"]
+        for stratum_offset, (stratum, failure) in enumerate(
+            (("valid", False), ("fallback", True))
+        ):
+            generated_subset = [
+                row
+                for row in generated_rows
+                if bool(row["shared_framework_failure"]) == failure
+            ]
+            empty_subset = [empty_by_id[row["example_id"]] for row in generated_subset]
+            comparison = paired_comparison(
+                empty_subset,
+                generated_subset,
+                baseline_name=f"{adapter}_empty_framework_{stratum}",
+                comparison_name=f"{adapter}_generated_framework_{stratum}",
+                seed=seed + adapter_offset * 2 + stratum_offset,
+                bootstrap_samples=bootstrap_samples,
+            )
+            results.append(
+                {
+                    "adapter": adapter,
+                    "stratum": stratum,
+                    "framework_failure": failure,
+                    **comparison,
+                }
+            )
+    return results
+
+
+def write_framework_strata(output_dir: Path, strata: list[dict]) -> None:
+    write_json(
+        output_dir / "framework_strata.json",
+        {
+            "metric": "strict_exact_match",
+            "estimand": "generated framework text minus empty framework under the same system prompt",
+            "stratification": "answer-blind generated framework passed structural validation or used fallback",
+            "strata": strata,
+        },
+    )
+    rows = [
+        {
+            "adapter": item["adapter"],
+            "stratum": item["stratum"],
+            "total": item["total"],
+            "empty_accuracy": item["baseline_accuracy"],
+            "generated_accuracy": item["comparison_accuracy"],
+            "accuracy_delta": item["accuracy_delta"],
+            "bootstrap_ci95_low": item["bootstrap_ci95_low"],
+            "bootstrap_ci95_high": item["bootstrap_ci95_high"],
+            "mcnemar_exact_pvalue": item["mcnemar_exact_pvalue"],
+        }
+        for item in strata
+    ]
+    with (output_dir / "framework_strata.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def plot_framework_strata(output_dir: Path, strata: list[dict]) -> None:
+    labels = [f"{item['adapter']}\n{item['stratum']} (n={item['total']})" for item in strata]
+    empty_values = [item["baseline_accuracy"] for item in strata]
+    generated_values = [item["comparison_accuracy"] for item in strata]
+    x_values = list(range(len(strata)))
+    width = 0.36
+    fig, axis = plt.subplots(figsize=(10, 5.8))
+    axis.bar([x - width / 2 for x in x_values], empty_values, width, label="Empty framework")
+    axis.bar(
+        [x + width / 2 for x in x_values],
+        generated_values,
+        width,
+        label="Generated/fallback framework",
+    )
+    axis.set_xticks(x_values, labels)
+    axis.set_ylim(0, 1.05)
+    axis.set_ylabel("Strict GSM8K exact-match accuracy")
+    axis.set_title("Generated-framework effect stratified by validation outcome")
+    axis.legend()
+    axis.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_dir / "framework_strata_accuracy.png", dpi=180)
+    plt.close(fig)
 
 
 def write_paired_outputs(output_dir: Path, comparisons: list[dict], config: dict) -> None:
@@ -1083,7 +1289,7 @@ def write_paired_outputs(output_dir: Path, comparisons: list[dict], config: dict
         {
             "metric": "strict_exact_match",
             "primary_comparisons": [row["name"] for row in comparisons if row["analysis_tier"] == "primary"],
-            "framework_effect_caveat": "framework_effect_on_* estimates the framework-conditioned prompt bundle, including its system instruction; it is not a framework-text-only intervention",
+            "framework_effect_caveat": "text effects use empty-framework controls under an identical system instruction; oracle comparisons read references and are diagnostic only",
             "delta_definition": "comparison_accuracy - baseline_accuracy",
             "bootstrap": "paired percentile bootstrap",
             "bootstrap_samples": int(config["bootstrap_samples"]),
@@ -1124,22 +1330,30 @@ def plot_grouped_accuracy(output_dir: Path, summaries: list[dict], include_base:
     adapters = ["base", "vanilla", "guided"] if include_base else ["vanilla", "guided"]
     labels = {"base": "Base", "vanilla": "Vanilla OPD", "guided": "Guided OPD"}
     positions = list(range(len(adapters)))
-    width = 0.36
-    fig, axis = plt.subplots(figsize=(9, 5.5))
-    for offset, (condition, label, color) in enumerate(
-        (("no_framework", "No framework", "#64748b"), ("with_framework", "Shared framework", "#10b981"))
-    ):
+    condition_specs = (
+        ("no_framework", "No framework", "#64748b"),
+        ("empty_framework", "Empty framework", "#94a3b8"),
+        ("fallback_framework", "Fixed fallback", "#f59e0b"),
+        ("generated_framework", "Generated framework", "#10b981"),
+        ("oracle_framework", "Oracle framework", "#2563eb"),
+    )
+    width = 0.16
+    fig, axis = plt.subplots(figsize=(12, 6.2))
+    for offset, (condition, label, color) in enumerate(condition_specs):
         values = [by_cell[f"{adapter}_{condition}"]["accuracy"] for adapter in adapters]
         lower = [value - by_cell[f"{adapter}_{condition}"]["accuracy_ci95_low"] for adapter, value in zip(adapters, values)]
         upper = [by_cell[f"{adapter}_{condition}"]["accuracy_ci95_high"] - value for adapter, value in zip(adapters, values)]
-        x_values = [position + (offset - 0.5) * width for position in positions]
+        x_values = [
+            position + (offset - (len(condition_specs) - 1) / 2) * width
+            for position in positions
+        ]
         bars = axis.bar(x_values, values, width, label=label, color=color, yerr=[lower, upper], capsize=5)
         for bar, value in zip(bars, values):
             axis.text(bar.get_x() + bar.get_width() / 2, value + 0.025, f"{value:.1%}", ha="center", fontsize=9)
     axis.set_xticks(positions, [labels[adapter] for adapter in adapters])
     axis.set_ylabel("Strict GSM8K exact-match accuracy")
     axis.set_ylim(0, 1.12)
-    axis.set_title(f"2×2 adapter × inference prompt evaluation (n={summaries[0]['total']})")
+    axis.set_title(f"Adapter × controlled framework ablation (n={summaries[0]['total']})")
     axis.grid(axis="y", alpha=0.25)
     axis.legend()
     fig.tight_layout()
@@ -1148,12 +1362,14 @@ def plot_grouped_accuracy(output_dir: Path, summaries: list[dict], include_base:
 
 
 def plot_paired_deltas(output_dir: Path, comparisons: list[dict]) -> None:
-    core = [row for row in comparisons if row["analysis_tier"] in {"primary", "system", "exploratory"}]
+    core = list(comparisons)
     labels = [row["name"].replace("_", " ") for row in core]
     values = [row["accuracy_delta"] for row in core]
     colors = []
     for row in core:
-        if row["bootstrap_ci95_low"] <= 0 <= row["bootstrap_ci95_high"]:
+        if row["analysis_tier"] == "diagnostic_oracle":
+            colors.append("#2563eb")
+        elif row["bootstrap_ci95_low"] <= 0 <= row["bootstrap_ci95_high"]:
             colors.append("#94a3b8")
         elif row["accuracy_delta"] > 0:
             colors.append("#10b981")
@@ -1168,7 +1384,7 @@ def plot_paired_deltas(output_dir: Path, comparisons: list[dict]) -> None:
     axis.set_yticks(y_values, labels)
     axis.invert_yaxis()
     axis.set_xlabel("Paired strict-accuracy delta")
-    axis.set_title("Paired deltas (neutral when the 95% bootstrap CI crosses zero)")
+    axis.set_title("Paired deltas (blue oracle rows are diagnostic only)")
     axis.grid(axis="x", alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_dir / "paired_deltas.png", dpi=180)
@@ -1203,9 +1419,15 @@ def plot_paired_outcomes(output_dir: Path, comparisons: list[dict]) -> None:
 def plot_accuracy_vs_cost(output_dir: Path, summaries: list[dict]) -> None:
     fig, axis = plt.subplots(figsize=(10, 6.5))
     for row in summaries:
-        with_framework = row["cell"].endswith("_with_framework")
-        color = "#10b981" if with_framework else "#64748b"
-        marker = "s" if with_framework else "o"
+        condition = split_cell(row["cell"])[1]
+        color = {
+            "no_framework": "#64748b",
+            "empty_framework": "#94a3b8",
+            "fallback_framework": "#f59e0b",
+            "generated_framework": "#10b981",
+            "oracle_framework": "#2563eb",
+        }[condition]
+        marker = "o" if condition == "no_framework" else "s"
         axis.errorbar(
             row["average_token_cost_proxy"],
             row["accuracy"],
@@ -1233,11 +1455,14 @@ def plot_accuracy_vs_cost(output_dir: Path, summaries: list[dict]) -> None:
 def plot_diagnostics(output_dir: Path, summaries: list[dict], framework_stats: dict) -> None:
     cells = [row["cell"] for row in summaries]
     labels = [cell.replace("_", "\n") for cell in cells]
-    colors = ["#10b981" if "with_framework" in cell else "#64748b" for cell in cells]
+    colors = [
+        "#10b981" if "generated_framework" in cell else "#2563eb" if "oracle_framework" in cell else "#64748b"
+        for cell in cells
+    ]
     fig, axes = plt.subplots(2, 2, figsize=(13, 8))
     panels = [
         ("answer_format_rate", "Valid final-line #### answer rate", (0, 1.05)),
-        ("eos_rate", "EOS termination rate", (0, 1.05)),
+        ("answer_stop_rate", "Answer-line stopping rate", (0, 1.05)),
         ("truncation_rate", "Student max-token truncation rate", (0, 1.05)),
         ("average_generated_tokens", "Average student output tokens", None),
     ]
@@ -1382,11 +1607,33 @@ def run_evaluation(config: dict, output_dir: Path, manifest: dict, *, resume: bo
     manifest["framework_cache_complete"] = len(framework_cache) == len(records)
     write_json(output_dir / "run_manifest.json", manifest)
 
+    oracle_source_sha = "oracle_" + manifest["provenance"]["models"]["teacher"]["sha256"]
+    previous_oracle_hash = manifest.get("oracle_framework_cache_sha256")
+    previous_oracle_complete = bool(manifest.get("oracle_framework_cache_complete", False))
+    oracle_framework_cache, oracle_framework_stats = generate_framework_cache(
+        config,
+        framework_tokenizer,
+        records,
+        output_dir,
+        oracle_source_sha,
+        resume=resume,
+        cache_name="oracle_framework_cache.jsonl",
+        oracle=True,
+    )
+    oracle_hash = file_sha256(output_dir / "oracle_framework_cache.jsonl")
+    if resume and previous_oracle_complete and previous_oracle_hash != oracle_hash:
+        raise ValueError("completed oracle framework cache fingerprint changed")
+    manifest["oracle_framework_generation"] = oracle_framework_stats
+    manifest["oracle_framework_cache_sha256"] = oracle_hash
+    manifest["oracle_framework_cache_complete"] = len(oracle_framework_cache) == len(records)
+    write_json(output_dir / "run_manifest.json", manifest)
+
     rows_by_cell = evaluate_cells(
         config,
         student_tokenizer,
         records,
         framework_cache,
+        oracle_framework_cache,
         output_dir,
         manifest,
         resume=resume,
@@ -1399,18 +1646,49 @@ def run_evaluation(config: dict, output_dir: Path, manifest: dict, *, resume: bo
     )
     summaries = write_accuracy(output_dir, rows_by_cell, cell_order)
     comparisons = build_comparisons(config, rows_by_cell)
+    strata = build_framework_strata(
+        rows_by_cell,
+        seed=int(config["seed"]) + 100,
+        bootstrap_samples=int(config["bootstrap_samples"]),
+    )
     write_paired_outputs(output_dir, comparisons, config)
+    write_framework_strata(output_dir, strata)
     plot_grouped_accuracy(output_dir, summaries, bool(config.get("include_base", False)))
     plot_paired_deltas(output_dir, comparisons)
     plot_paired_outcomes(output_dir, comparisons)
     plot_accuracy_vs_cost(output_dir, summaries)
     plot_diagnostics(output_dir, summaries, framework_stats)
+    plot_framework_strata(output_dir, strata)
     finalize_manifest(output_dir, manifest)
     print(json.dumps(summaries, ensure_ascii=False, indent=2), flush=True)
 
 
+def resolve_project_paths(config: dict, project_root: Path | None = None) -> dict:
+    """Resolve project-owned config paths without depending on the caller's cwd."""
+    root = (project_root or Path(__file__).resolve().parent).resolve()
+    resolved = dict(config)
+    for key in (
+        "student_model",
+        "teacher_model",
+        "framework_teacher_adapter",
+        "dataset",
+        "output_dir",
+    ):
+        value = resolved.get(key)
+        if value:
+            path = Path(value)
+            resolved[key] = str(path if path.is_absolute() else (root / path).resolve())
+    adapters = resolved.get("adapters")
+    if isinstance(adapters, dict):
+        resolved["adapters"] = {
+            name: str(path if (path := Path(value)).is_absolute() else (root / path).resolve())
+            for name, value in adapters.items()
+        }
+    return resolved
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a provenance-locked paired 2×2 OPD evaluation")
+    parser = argparse.ArgumentParser(description="Run a provenance-locked controlled OPD ablation")
     parser.add_argument("--config", required=True)
     parser.add_argument("--resume", action="store_true", help="resume only after immutable provenance checks")
     args = parser.parse_args()
@@ -1419,11 +1697,12 @@ def main() -> None:
     config = json.loads(config_bytes)
     if not isinstance(config, dict):
         raise ValueError("evaluation config must be a JSON object")
+    repo_root = Path(__file__).resolve().parent
+    config = resolve_project_paths(config, repo_root)
     if args.resume:
         config["resume"] = True
     validate_config(config)
 
-    repo_root = Path(__file__).resolve().parent
     provenance = collect_provenance(config, repo_root)
     signature = experiment_signature(config)
     output_dir = Path(config["output_dir"])
@@ -1475,12 +1754,14 @@ def main() -> None:
             "provenance": provenance,
             "metric": "strict answer on the last non-empty physical line only",
             "relaxed_metric": "last-number fallback (diagnostic only)",
-            "token_cost_proxy": "student prompt+output; with-framework adds every 4B framework attempt prompt+output token",
-            "framework_reuse": "one question-only framework cache entry shared by every with-framework cell",
-            "framework_effect_estimand": "framework-conditioned prompt bundle (framework plus its system instruction), not framework text alone",
+            "token_cost_proxy": "student prompt+output; generated/oracle cells add their own 4B framework attempt tokens",
+            "framework_reuse": "one answer-blind generated cache and one reference-aware oracle cache shared across adapters",
+            "framework_effect_estimand": "empty-framework controls isolate framework text from the framework-conditioned system instruction",
+            "oracle_caveat": "oracle frameworks read test references and are diagnostic upper bounds only",
             "primary_comparisons": [
                 "guided_minus_vanilla_no_framework",
-                "guided_minus_vanilla_with_framework",
+                "guided_minus_vanilla_generated_framework",
+                "guided_generated_system_minus_vanilla_no_framework",
             ],
             "cells": ordered_cells(bool(config.get("include_base", False))),
             "completed_cells": [],
