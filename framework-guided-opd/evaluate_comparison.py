@@ -6,7 +6,6 @@ import json
 import platform
 import random
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +24,7 @@ from framework_opd.answer_stopping import (
     truncate_after_first_complete_answer,
 )
 from framework_opd.data import load_records
+from framework_opd.eval_batching import generate_batch, generate_framework_batch, iter_parallel_batches
 from framework_opd.evaluation import (
     artifact_fingerprint,
     experiment_signature,
@@ -36,10 +36,10 @@ from framework_opd.evaluation import (
 )
 from framework_opd.framework_validation import validate_framework
 from framework_opd.prompts import format_student_prompt, format_vanilla_student_prompt
-from framework_opd.rollout import FALLBACK_FRAMEWORK, GenerationResult, generate_framework_result
+from framework_opd.rollout import FALLBACK_FRAMEWORK, GenerationResult
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 FRAMEWORK_CONDITIONS = (
     "no_framework",
     "empty_framework",
@@ -55,6 +55,7 @@ CORE_CELL_ORDER = [
 SOURCE_FILES = [
     "evaluate_comparison.py",
     "src/framework_opd/data.py",
+    "src/framework_opd/eval_batching.py",
     "src/framework_opd/answer_stopping.py",
     "src/framework_opd/evaluation.py",
     "src/framework_opd/framework_validation.py",
@@ -157,6 +158,22 @@ def load_causal_model(path: str, device: str):
     ).to(device)
 
 
+def load_eval_replicas(config: dict, model_path: str, adapter_path: str | None, default_device: str):
+    replicas = []
+    for device in config.get("eval_devices", [default_device]):
+        model = load_causal_model(model_path, device)
+        if adapter_path:
+            model = PeftModel.from_pretrained(model, adapter_path, is_trainable=False)
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, local_files_only=True, trust_remote_code=True, padding_side="left"
+        )
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        replicas.append((model, tokenizer))
+    return replicas
+
+
 def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> GenerationResult:
     encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)
     encoded = {name: tensor.to(model.device) for name, tensor in encoded.items()}
@@ -228,12 +245,23 @@ def validate_config(config: dict) -> None:
         "framework_teacher_expected_records",
         "bootstrap_samples",
         "progress_every",
+        "student_batch_size",
+        "framework_batch_size",
     ):
         value = config.get(key, 1)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{key} must be a positive integer")
     if config["max_new_tokens"] > 2048:
         raise ValueError("max_new_tokens must not exceed 2048")
+    if "eval_devices" in config:
+        devices = config["eval_devices"]
+        if not isinstance(devices, list) or not devices or any(
+            not isinstance(device, str) or not device.startswith("cuda:")
+            or not device[5:].isdigit() for device in devices
+        ):
+            raise ValueError("eval_devices must be a non-empty list of explicit CUDA devices")
+        if len({int(device[5:]) for device in devices}) != len(devices):
+            raise ValueError("eval_devices must not repeat a GPU")
     framework_temperature = config["framework_generation_temperature"]
     if (
         not isinstance(framework_temperature, (int, float))
@@ -631,7 +659,6 @@ def load_framework_cache(
 
 def generate_framework_cache(
     config: dict,
-    tokenizer,
     records: list[dict],
     output_dir: Path,
     framework_adapter_sha256: str,
@@ -651,33 +678,27 @@ def generate_framework_cache(
     write_jsonl(cache_path, ordered_cached)
     missing_records = [record for record in records if record["example_id"] not in cache]
 
-    framework_base = framework_teacher = None
+    replicas = []
     if missing_records:
-        framework_base = load_causal_model(config["teacher_model"], config["teacher_device"])
-        framework_teacher = (
-            framework_base
-            if oracle
-            else PeftModel.from_pretrained(
-                framework_base,
-                config["framework_teacher_adapter"],
-                is_trainable=False,
-            )
+        replicas = load_eval_replicas(
+            config, config["teacher_model"],
+            None if oracle else config["framework_teacher_adapter"], config["teacher_device"],
         )
-        framework_teacher.eval()
+
+    def complete_framework_batch(model, batch_tokenizer, batch):
+        return generate_framework_batch(
+            model, batch_tokenizer, batch,
+            max_new_tokens=config["framework_max_new_tokens"],
+            temperature=float(config["framework_generation_temperature"]),
+            max_attempts=max_attempts, oracle=oracle,
+        )
+
+    batches = iter_parallel_batches(
+        missing_records, replicas, int(config.get("framework_batch_size", 1)), complete_framework_batch
+    ) if missing_records else ()
 
     with cache_path.open("a", encoding="utf-8") as stream:
-        for position, record in enumerate(missing_records, 1):
-            started = time.perf_counter()
-            result = generate_framework_result(
-                framework_teacher,
-                tokenizer,
-                record["question"],
-                max_new_tokens=config["framework_max_new_tokens"],
-                temperature=float(config["framework_generation_temperature"]),
-                max_attempts=max_attempts,
-                reference_answer=record["answer"] if oracle else None,
-            )
-            latency = time.perf_counter() - started
+        for position, (record, result, latency) in enumerate(batches, 1):
             framework = list(result.steps)
             used_fallback = bool(result.used_fallback)
             if used_fallback and policy == "error":
@@ -717,9 +738,8 @@ def generate_framework_cache(
                 label = "oracle-frameworks" if oracle else "generated-frameworks"
                 print(f"[{label}] {completed}/{len(records)} (fallbacks={failures})", flush=True)
 
-    if framework_teacher is not None:
-        del framework_teacher
-        del framework_base
+    if replicas:
+        replicas.clear()
         clear_cuda_cache()
     failures = sum(bool(item["framework_failure"]) for item in cache.values())
     attempts = sum(int(item["framework_attempts"]) for item in cache.values())
@@ -988,16 +1008,25 @@ def evaluate_cells(
             if not any(pending_by_cell.values()):
                 print(f"[{adapter_name}] reusing completed ablation cells", flush=True)
                 continue
-            model = load_causal_model(config["student_model"], config["student_device"])
-            if adapter_path:
-                model = PeftModel.from_pretrained(model, adapter_path, is_trainable=False)
-            model.eval()
+            replicas = load_eval_replicas(
+                config, config["student_model"], adapter_path, config["student_device"]
+            )
             for cell in cells:
                 _, condition = split_cell(cell)
                 use_framework = condition != "no_framework"
                 missing = pending_by_cell[cell]
                 existing_count = len(rows_by_cell[cell])
-                for position, record in enumerate(missing, 1):
+                def complete_student_batch(model, batch_tokenizer, batch):
+                    prompts = [prompt_for_condition(
+                        record, framework_cache[record["example_id"]],
+                        oracle_framework_cache[record["example_id"]], condition,
+                    ) for record in batch]
+                    return generate_batch(model, batch_tokenizer, prompts, config["max_new_tokens"])
+
+                batches = iter_parallel_batches(
+                    missing, replicas, int(config.get("student_batch_size", 1)), complete_student_batch
+                )
+                for position, (record, generated, student_latency) in enumerate(batches, 1):
                     generated_entry = framework_cache[record["example_id"]]
                     oracle_entry = oracle_framework_cache[record["example_id"]]
                     framework, source_entry, framework_source = framework_for_condition(
@@ -1006,9 +1035,6 @@ def evaluate_cells(
                     prompt = prompt_for_condition(
                         record, generated_entry, oracle_entry, condition
                     )
-                    started = time.perf_counter()
-                    generated = generate_completion(model, tokenizer, prompt, config["max_new_tokens"])
-                    student_latency = time.perf_counter() - started
                     prompt_tokens = int(generated.prompt_tokens)
                     output_tokens = len(generated.token_ids)
                     framework_prompt_tokens = int(source_entry["framework_prompt_tokens"]) if source_entry else 0
@@ -1065,7 +1091,7 @@ def evaluate_cells(
                     manifest["completed_cells"].append(cell)
                 manifest["partial_cells"].pop(cell, None)
                 write_json(output_dir / "run_manifest.json", manifest)
-            del model
+            replicas.clear()
             clear_cuda_cache()
     return rows_by_cell
 
@@ -1571,11 +1597,6 @@ def run_evaluation(config: dict, output_dir: Path, manifest: dict, *, resume: bo
     )
     if student_tokenizer.pad_token_id is None:
         student_tokenizer.pad_token = student_tokenizer.eos_token
-    framework_tokenizer = AutoTokenizer.from_pretrained(
-        config["teacher_model"], local_files_only=True, trust_remote_code=True
-    )
-    if framework_tokenizer.pad_token_id is None:
-        framework_tokenizer.pad_token = framework_tokenizer.eos_token
 
     records = select_records(config["dataset"], int(config["limit"]), int(config["seed"]))
     if not records:
@@ -1593,7 +1614,6 @@ def run_evaluation(config: dict, output_dir: Path, manifest: dict, *, resume: bo
     previous_complete = bool(manifest.get("framework_cache_complete", False))
     framework_cache, framework_stats = generate_framework_cache(
         config,
-        framework_tokenizer,
         records,
         output_dir,
         framework_adapter_sha,
@@ -1612,7 +1632,6 @@ def run_evaluation(config: dict, output_dir: Path, manifest: dict, *, resume: bo
     previous_oracle_complete = bool(manifest.get("oracle_framework_cache_complete", False))
     oracle_framework_cache, oracle_framework_stats = generate_framework_cache(
         config,
-        framework_tokenizer,
         records,
         output_dir,
         oracle_source_sha,
@@ -1756,6 +1775,7 @@ def main() -> None:
             "relaxed_metric": "last-number fallback (diagnostic only)",
             "token_cost_proxy": "student prompt+output; generated/oracle cells add their own 4B framework attempt tokens",
             "framework_reuse": "one answer-blind generated cache and one reference-aware oracle cache shared across adapters",
+            "latency_semantics": "per-record latency is batch wall time divided by batch size, not single-request latency; sums across GPUs are device-time costs, not total elapsed time",
             "framework_effect_estimand": "empty-framework controls isolate framework text from the framework-conditioned system instruction",
             "oracle_caveat": "oracle frameworks read test references and are diagnostic upper bounds only",
             "primary_comparisons": [

@@ -87,6 +87,27 @@ tail -f comparison_evaluation_v4.log
 
 输出目录：`outputs/comparison-eval-v4-framework-ablation/`。
 
+双 A800 80GB 的评测配置为 `eval_devices: ["cuda:0", "cuda:1"]`，
+`student_batch_size: 16` 和 `framework_batch_size: 16`，均为**每卡**批量。
+两卡各加载完整模型副本并分摊题目，框架缓存、oracle 缓存以及每个 Student 条件依次执行；
+同一阶段同时处理最多 32 题，不进行跨卡张量切分。每条答案单独停止，padding 不计入 token 成本。
+显存不足时同时把两个 batch 参数改成 8；模型、提示、评分与 2048 输出上限不变。
+
+批量评测的协议版本为 6，记录的单题 latency 是**整批耗时除以批量**，不是交互式单请求延迟；
+跨 GPU 求和代表设备时间成本，不代表整体墙钟耗时。批量矩阵运算可能产生浮点数值差异，
+不能承诺与旧逐题评测逐 token 一致。batch 和设备配置也属于实验签名，不应中途更换后混合结果。
+旧逐题协议或旧源码结果不能直接 `--resume`；保留旧目录，使用新的输出目录重跑。
+同版本同配置中断时可使用：
+
+```bash
+PYTHONPATH=src /root/blockdata/kv_cache_env/bin/python evaluate_comparison.py \
+  --config configs/evaluation.json --resume
+```
+
+可运行 `PYTHONPATH=src:. /root/blockdata/kv_cache_env/bin/python tests/smoke_eval_batching.py`
+做隔离的双卡吞吐与十单元流程检查。该脚本的两组标签都使用 Vanilla 权重作为测试夹具，
+结果保存在新建临时目录，**不能用作正式 Guided 对照结论**。
+
 每个 adapter 都评估以下五种条件：
 
 | 条件 | System prompt | Framework 文本 | 是否读取测试答案 |
@@ -138,6 +159,7 @@ run_manifest.json
 - `src/framework_opd/rollout.py`：框架生成和答案感知 Student on-policy rollout。
 - `train_opd.py`：Vanilla/Guided OPD 训练、checkpoint 和安全恢复。
 - `evaluate_comparison.py`：五条件消融、配对统计、分层报告和绘图。
+- `src/framework_opd/eval_batching.py`：仅用于评测的双卡批处理、逐样本停止、框架失败重试和 token 计数；不影响训练代码哈希。
 - `configs/*_v3.json`：新训练与冒烟配置；旧 v2 配置和产物仅用于历史追溯。
 
 ## 测试
